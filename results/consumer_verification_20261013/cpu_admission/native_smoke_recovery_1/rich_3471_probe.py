@@ -1,0 +1,22 @@
+import importlib, json
+from pathlib import Path
+for name in ['rich', 'rich.text', 'rich.console']:
+    module = importlib.import_module(name)
+    origin = str(Path(module.__file__).resolve())
+    print("IMPORT_GUARD " + json.dumps({"module": name, "origin": origin}), flush=True)
+    assert origin.startswith("/workspace/"), (name, origin)
+from rich.text import Text
+from rich.console import Console
+text = Text().append_tokens([
+    ("long text that will be wrapped with a control code \r\n", "red"),
+])
+console = Console()
+with console.capture() as capture:
+    console.print(text, width=40)
+output = capture.get()
+reference = Text("long text that will be wrapped with a control code \r\n", style="red")
+with console.capture() as reference_capture:
+    console.print(reference, width=40)
+expected_output = reference_capture.get()
+print("CONSUMER_RESULT " + json.dumps({"output": output, "expected_output": expected_output}), flush=True)
+assert output == expected_output, (output, expected_output)

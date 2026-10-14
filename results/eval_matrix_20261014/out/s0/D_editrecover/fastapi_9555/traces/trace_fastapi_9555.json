@@ -1,0 +1,416 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "agent": {
+    "name": "adk-eval-core",
+    "version": "1.0"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "system",
+      "message": "You are an expert autonomous software engineer. Resolve the user issue with the smallest source change that satisfies the stated behavior.\n\nThe hidden grader applies your git diff to a fresh repository and runs its own tests. It never sees your reasoning. An empty diff scores zero. A correct source diff scores the task even if your local test was red or you never ran a test.\n\n## Budget\nYou have 28 tool calls and 8 minutes. When either limit hits, the working tree is graded as it is. An edit made in time counts even if you do not reach submit_patch. Finish as soon as the edit is in so later tasks still have time.\n\n## 1. Contract, before any tool call\nRead the issue and keep a short list of the exact symbols, signatures, error strings, HTTP status codes, and return values it requires. Copy them character for character. The grader checks those strings exactly.\n\n## 2. Locate in a few reads\n- Search once with `git grep -n \"SPECIFIC_TOKEN\" -- '*.py' | head -20`. Use the most specific identifier or error string from the issue.\n- Open only the matching region with `read_file`, at most 120 lines (`start_line` and `end_line`).\n- You may do one follow-up grep or read if the first hit only re-exports the symbol.\n- Do not page through unrelated files. Do not read a whole file when a range will do.\n\n## 3. Edit by tool call 12\n- By your 12th tool call a source file must already be edited. If it is not, edit the most likely function immediately. Runs that are still only reading after 12 calls almost never succeed.\n- Prefer `edit_file`. `old_string` must match the file exactly, including indentation. Change the smallest span that implements the contract.\n- Every `edit_file` call needs `path`, `old_string` and `new_string`. If an edit is rejected twice, stop retrying it. Apply the change with `run_command` and a short `python3 - <<'EOF'` script that reads the file, asserts the old text occurs exactly once, replaces it, and writes the file back.\n- FastAPI documentation tasks: edit the executable example under `docs_src/`.\n- Do not reformat or refactor unrelated code.\n- Create a new file only when the issue explicitly requires a new module. Never create or edit `test_*.py`, `*_test.py`, anything under `tests/`, `pytest.ini`, or `conftest.py`.\n- Any scratch script goes in `/tmp` through `run_command`. Never write scratch files into `/workspace`. Files left in the repository become part of the diff and fail grading.\n\n## 4. One check, one repair, then submit\n- After the edit, run at most one focused check: `pytest tests/test_file.py -k test_name -q` or `python -c \"...\"`.\n- Never run bare `pytest`, `pytest .`, or `python -m unittest discover`.\n- If that check fails with an assertion about the behavior you changed, apply one `edit_file` using the assertion text, then stop testing.\n- If it fails because of missing fixtures, import errors, or pre-existing breakage, ignore it. Do not repair tests and do not install packages.\n- Call `submit_patch` after that, even when the local check is red or you skipped it. A local green test is not the grader.\n- If the diff contains a test path, run `git checkout --` on that path and call `submit_patch` again.\n- If `get_status` shows less than 90 seconds remaining, call `submit_patch` immediately.\n\n## Never\n- Conclude that the code is already correct. Every task needs a source modification and a non-empty patch.\n- Search outside `/workspace` (`/usr`, `/wheels`, `/opt`). Dependencies are already installed.\n- Spend calls on broad exploration after the first edit.",
+      "extra": {
+        "event_type": "system_instruction",
+        "elapsed_s": 12.592438459396362,
+        "timestamp": 1791956183.4140499,
+        "author": "harness"
+      }
+    },
+    {
+      "step_id": 2,
+      "source": "user",
+      "message": "You are evaluating a software engineering task for repository fastapi/fastapi.\n\nProblem Statement:\n\u2728 Handle wrapped dependencies\n\nUse the unwrapped call in `solve_dependencies` to determine if a dependency is a coroutine or (async) generator.\r\n\r\nSince non-async dependencies are run in a threadpool, it's generally preferably to use async dependencies. For dependencies that will not change during the lifetime of the server (like settings), it's preferable to use `functools.cache` to avoid duplicate work. There are two issues with this.\r\n\r\nFirst is that `@cache` will cache the coroutine itself not the result, so the first call will succeed; however, subsequent calls will fail with `RuntimeError: cannot reuse already awaited coroutine`. This is fixable with @serhiy-storchaka's `reawaitable` decorator outlined in  https://github.com/python/cpython/issues/90780 .\r\n\r\nThe second issue is that when solving dependencies, FastAPI does not consider the `__wrapped__` attribute, so because the `lru_cache_wrapper` object is not a coroutine, FastAPI will not attempt to await it. In the example below this results in an error `AttributeError: 'coroutine' object has no attribute 'foo'`. This is the issue this PR solves by calling `inspect.unwrap` on the dependency call and using the unwrapped call to determine what type it is.\r\n\r\n```py3\r\nfrom functools import cache\r\nfrom functools import wraps\r\nfrom typing import Awaitable\r\nfrom typing import Callable\r\nfrom typing import Generic\r\nfrom typing import Iterator\r\nfrom typing import ParamSpec\r\nfrom typing import TypeVar\r\n\r\nfrom fastapi import Depends\r\nfrom fastapi import FastAPI\r\nfrom pydantic import BaseSettings\r\n\r\n\r\nP = ParamSpec('P')\r\nT = TypeVar('T')\r\n\r\n\r\n# Based off https://github.com/python/cpython/issues/90780#issuecomment-1093943964\r\nclass Reawaitable(Generic[T]):\r\n    __sentinel = object()\r\n\r\n    def __init__(self, awaitable: Awaitable[T]) -> None:\r\n        self.awaitable = awaitable\r\n        self.result = self.__sentinel\r\n\r\n    def __await__(self) -> Iterator[T]:\r\n        if self.result is self.__sentinel:\r\n            self.result = yield from self.awaitable.__await__()\r\n        return self.result\r\n\r\n\r\ndef reawaitable(func: Callable[P, Awaitable[T]]) -> Callable[P, Reawaitable[T]]:\r\n    @wraps(func)\r\n    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Reawaitable[T]:\r\n        return Reawaitable(func(*args, **kwargs))\r\n    return wrapper\r\n\r\n\r\nclass Settings(BaseSettings):\r\n    foo: str = 'bar'\r\n\r\n\r\napp = FastAPI()\r\n\r\n\r\n@cache\r\n@reawaitable\r\nasync def get_settings() -> Settings:\r\n    return Settings()\r\n\r\n\r\n@app.get('/foo')\r\nasync def foo(settings: Settings = Depends(get_settings)) -> str:\r\n    return settings.foo\r\n```\r\n\r\nIf anyone comes across this in the mean time, a reasonable workaround is to wrap the cached function in an undecorated function. \r\n\r\n```py3\r\nasync def get_settings() -> Settings:\r\n    return await _get_settings()\r\n\r\n\r\n@cache\r\n@reawaitable\r\nasync def _get_settings() -> Settings:\r\n    return Settings()\r\n```\r\n\r\n(Related to #5077)\n\n## Task Budget (Session terminates when any budget is exhausted)\n- Time allowance: 8.0 minutes\n- Tool calls allowance: 28 calls\n- Max loop iterations: 80 turns\n\n## Execution Environment Rules\n- Single command timeout: 240 seconds (commands exceeding this fail without ending the session)\n- Command output limit: 5000 characters\n- File view limit: 150 lines per read_file call\n- File character limit: 10000 characters per read_file call\n- Environment is offline (no network/PyPI access). All repository and test dependencies are ALREADY pre-installed. Do NOT attempt to run pip install or download packages.\n\n## Instructions:\n0. All source code is under `/workspace`. Do NOT search outside `/workspace` (e.g. `/usr/`, `/wheels/`, system site-packages). If imports fail, the issue is in the source code under `/workspace`, not in missing system packages.\n1. Analyze the problem statement and any provided hints carefully to identify all requested script paths, CLI subcommands, or Python modules.\n2. Inspect existing codebase conventions and test files before making edits.\n3. Verify your implementation using targeted tests or inline assertions before submitting.\n4. Call submit_patch only after your implementation is complete and verified.\n5. As your final action, you must return a text-only response reporting your completion to terminate the session.\n## Workspace Layout\nThe repository is located at `/workspace`. Here is the directory tree (up to 3 levels):\n```\n./CITATION.cff\n./CONTRIBUTING.md\n./LICENSE\n./README.md\n./SECURITY.md\n./conftest.py\n./docs\n./docs_src\n./fastapi\n./fastapi/__init__.py\n./fastapi/__main__.py\n./fastapi/_compat\n./fastapi/_compat/__init__.py\n./fastapi/_compat/main.py\n./fastapi/_compat/may_v1.py\n./fastapi/_compat/model_field.py\n./fastapi/_compat/shared.py\n./fastapi/_compat/v1.py\n./fastapi/_compat/v2.py\n./fastapi/applications.py\n./fastapi/background.py\n./fastapi/cli.py\n./fastapi/concurrency.py\n./fastapi/datastructures.py\n./fastapi/dependencies\n./fastapi/dependencies/__init__.py\n./fastapi/dependencies/models.py\n./fastapi/dependencies/utils.py\n./fastapi/encoders.py\n./fastapi/exception_handlers.py\n./fastapi/exceptions.py\n./fastapi/logger.py\n./fastapi/middleware\n./fastapi/middleware/__init__.py\n./fastapi/middleware/asyncexitstack.py\n./fastapi/middleware/cors.py\n./fastapi/middleware/gzip.py\n./fastapi/middleware/httpsredirect.py\n./fastapi/middleware/trustedhost.py\n./fastapi/middleware/wsgi.py\n./fastapi/openapi\n./fastapi/openapi/__init__.py\n./fastapi/openapi/constants.py\n./fastapi/openapi/docs.py\n./fastapi/openapi/models.py\n./fastapi/openapi/utils.py\n./fastapi/param_functions.py\n./fastapi/params.py\n./fastapi/py.typed\n./fastapi/requests.py\n./fastapi/responses.py\n./fastapi/routing.py\n./fastapi/security\n./fastapi/security/__init__.py\n./fastapi/security/api_key.py\n./fastapi/security/base.py\n./fastapi/security/http.py\n./fastapi/security/oauth2.py\n./fastapi/security/open_id_connect_url.py\n./fastapi/security/utils.py\n./fastapi/staticfiles.py\n./fastapi/temp_pydantic_v1_params.py\n./fastapi/templating.py\n./fastapi/testclient.py\n./fastapi/types.py\n./fastapi/utils.py\n./fastapi/websockets.py\n./pdm_build.py\n./pyproject.toml\n./pytest.ini\n./requirements-docs-tests.txt\n./requirements-docs.txt\n./requirements-github-actions.txt\n./requirements-tests.txt\n./requirements-translations.txt\n./requirements.txt\n./scripts\n./scripts/contributors.py\n./scripts/coverage.sh\n./scripts/deploy_docs_status.py\n./scripts/docs.py\n./scripts/format.sh\n./scripts/label_approved.py\n./scripts/lint.sh\n./scripts/mkdocs_hooks.py\n./scripts/notify_translations.py\n./scripts/people.py\n./scripts/playwright\n./scripts/playwright/cookie_param_models\n./scripts/playwright/header_param_models\n./scripts/playwright/query_param_models\n./scripts/playwright/request_form_models\n./scripts/playwright/separate_openapi_schemas\n./scripts/playwright/sql_databases\n./scripts/sponsors.py\n./scripts/test-cov-html.sh\n./scripts/test.sh\n./scripts/topic_repos.py\n./scripts/translate.py\n./tests\n```\n",
+      "extra": {
+        "event_type": "task_prompt",
+        "elapsed_s": 12.592448711395264,
+        "timestamp": 1791956183.41406,
+        "author": "harness"
+      }
+    },
+    {
+      "step_id": 3,
+      "source": "agent",
+      "message": "The user wants to handle wrapped dependencies in FastAPI's `solve_dependencies`.\nThe issue is that FastAPI doesn't consider the `__wrapped__` attribute when determining if a dependency is a coroutine or (async) generator.\nThis causes issues when using decorators like `functools.cache` or a custom `reawaitable` decorator.\n\nThe suggested fix is to use `inspect.unwrap` on the dependency call before determining its type.\n\nI need to find where `solve_dependencies` is defined and where it checks if a dependency is a coroutine or generator.\n\nLooking at the file structure, `fastapi/dependencies/utils.py` seems like a good place to start.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_3",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "git grep -n \"solve_dependencies\" -- '*.py'"
+          },
+          "extra": {
+            "elapsed_s": 21.551639080047607,
+            "timestamp": 1791956192.3732505,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"fastapi/dependencies/utils.py:565:async def solve_dependencies(\\nfastapi/dependencies/utils.py:616:        solved_result = await solve_dependencies(\\nfastapi/routing.py:46:    solve_dependencies,\\nfastapi/routing.py:381:        solved_result = await solve_dependencies(\\nfastapi/routing.py:451:        solved_result = await solve_dependencies(\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 21.616149425506592,
+          "timestamp": 1791956192.4377608,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 3697,
+        "completion_tokens": 176,
+        "cached_tokens": 0,
+        "total_tokens": 3873
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 21.551639080047607,
+        "timestamp": 1791956192.3732505,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 4,
+      "source": "agent",
+      "message": "Okay, `solve_dependencies` is in `fastapi/dependencies/utils.py`. Let's examine that file.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_6",
+          "function_name": "read_file",
+          "arguments": {
+            "filepath": "fastapi/dependencies/utils.py",
+            "start_line": 565
+          },
+          "extra": {
+            "elapsed_s": 23.338260173797607,
+            "timestamp": 1791956194.1598716,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/utils.py\", \"content\": \"async def solve_dependencies(\\n    *,\\n    request: Union[Request, WebSocket],\\n    dependant: Dependant,\\n    body: Optional[Union[Dict[str, Any], FormData]] = None,\\n    background_tasks: Optional[StarletteBackgroundTasks] = None,\\n    response: Optional[Response] = None,\\n    dependency_overrides_provider: Optional[Any] = None,\\n    dependency_cache: Optional[Dict[DependencyCacheKey, Any]] = None,\\n    # TODO: remove this parameter later, no longer used, not removing it yet as some\\n    # people might be monkey patching this function (although that's not supported)\\n    async_exit_stack: AsyncExitStack,\\n    embed_body_fields: bool,\\n) -> SolvedDependency:\\n    request_astack = request.scope.get(\\\"fastapi_inner_astack\\\")\\n    assert isinstance(request_astack, AsyncExitStack), (\\n        \\\"fastapi_inner_astack not found in request scope\\\"\\n    )\\n    function_astack = request.scope.get(\\\"fastapi_function_astack\\\")\\n    assert isinstance(function_astack, AsyncExitStack), (\\n        \\\"fastapi_function_astack not found in request scope\\\"\\n    )\\n    values: Dict[str, Any] = {}\\n    errors: List[Any] = []\\n    if response is None:\\n        response = Response()\\n        del response.headers[\\\"content-length\\\"]\\n        response.status_code = None  # type: ignore\\n    if dependency_cache is None:\\n        dependency_cache = {}\\n    for sub_dependant in dependant.dependencies:\\n        sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)\\n        call = sub_dependant.call\\n        use_sub_dependant = sub_dependant\\n        if (\\n            dependency_overrides_provider\\n            and dependency_overrides_provider.dependency_overrides\\n        ):\\n            original_call = sub_dependant.call\\n            call = getattr(\\n                dependency_overrides_provider, \\\"dependency_overrides\\\", {}\\n            ).get(original_call, original_call)\\n            use_path: str = sub_dependant.path  # type: ignore\\n            use_sub_dependant = get_dependant(\\n                path=use_path,\\n                call=call,\\n                name=sub_dependant.name,\\n                parent_oauth_scopes=sub_dependant.oauth_scopes,\\n                scope=sub_dependant.scope,\\n            )\\n\\n        solved_result = await solve_dependencies(\\n            request=request,\\n            dependant=use_sub_dependant,\\n            body=body,\\n            background_tasks=background_tasks,\\n            response=response,\\n            dependency_overrides_provider=dependency_overrides_provider,\\n            dependency_cache=dependency_cache,\\n            async_exit_stack=async_exit_stack,\\n            embed_body_fields=embed_body_fields,\\n        )\\n        background_tasks = solved_result.background_tasks\\n        if solved_result.errors:\\n            errors.extend(solved_result.errors)\\n            continue\\n        if sub_dependant.use_cache and sub_dependant.cache_key in dependency_cache:\\n            solved = dependency_cache[sub_dependant.cache_key]\\n        elif (\\n            use_sub_dependant.is_gen_callable or use_sub_dependant.is_async_gen_callable\\n        ):\\n            use_astack = request_astack\\n            if sub_dependant.scope == \\\"function\\\":\\n                use_astack = function_astack\\n            solved = await _solve_generator(\\n                dependant=use_sub_dependant,\\n                stack=use_astack,\\n                sub_values=solved_result.values,\\n            )\\n        elif use_sub_dependant.is_coroutine_callable:\\n            solved = await call(**solved_result.values)\\n        else:\\n            solved = await run_in_threadpool(call, **solved_result.values)\\n        if sub_dependant.name is not None:\\n            values[sub_dependant.name] = solved\\n        if sub_dependant.cache_key not in dependency_cache:\\n            dependency_cache[sub_dependant.cache_key] = solved\\n    path_values, path_errors = request_params_to_args(\\n        dependant.path_params, request.path_params\\n    )\\n    query_values, query_errors = request_params_to_args(\\n        dependant.query_params, request.query_params\\n    )\\n    header_values, header_errors = request_params_to_args(\\n        dependant.header_params, request.headers\\n    )\\n    cookie_values, cookie_errors = request_params_to_args(\\n        dependant.cookie_params, request.cookies\\n    )\\n    values.update(path_values)\\n    values.update(query_values)\\n    values.update(header_values)\\n    values.update(cookie_values)\\n    errors += path_errors + query_errors + header_errors + cookie_errors\\n    if dependant.body_params:\\n        (\\n            body_values,\\n            body_errors,\\n        ) = await request_body_to_args(  # body_params checked above\\n            body_fields=dependant.body_params,\\n            received_body=body,\\n            embed_body_fields=embed_body_fields,\\n        )\\n        values.update(body_values)\\n        errors.extend(body_errors)\\n    if dependant.http_connection_param_name:\\n        values[dependant.http_connection_param_name] = request\\n    if dependant.request_param_name and isinstance(request, Request):\\n        values[dependant.request_param_name] = request\\n    elif dependant.websocket_param_name and isinstance(request, WebSocket):\\n        values[dependant.websocket_param_name] = request\\n    if dependant.background_tasks_param_name:\\n        if background_tasks is None:\\n            background_tasks = BackgroundTasks()\\n        values[dependant.background_tasks_param_name] = background_tasks\\n    if dependant.response_param_name:\\n        values[dependant.response_param_name] = response\\n    if dependant.security_scopes_param_name:\\n        values[dependant.security_scopes_param_name] = SecurityScopes(\\n            scopes=dependant.oauth_scopes\\n        )\\n    return SolvedDependency(\\n        values=values,\\n        errors=errors,\\n        background_tasks=background_tasks,\\n        response=response,\\n        dependency_cache=dependency_cache,\\n    )\\n\\n\\ndef _validate_value_with_model_field(\\n    *, field: ModelField, value: Any, values: Dict[str, Any], loc: Tuple[str, ...]\\n) -> Tuple[Any, List[Any]]:\\n    if value is None:\\n        if field.required:\\n            return None, [get_missing_field_error(loc=loc)]\\n        else:\\n            return deepcopy(field.default), []\\n    v_, errors_ = field.validate(value, values, loc=loc)\\n    if _is_error_wrapper(errors_):  # type: ignore[arg-type]\", \"start_line\": 565, \"end_line\": 714, \"total_lines\": 1035, \"is_truncated\": true}",
+        "extra": {
+          "tool_name": "read_file",
+          "elapsed_s": 23.39337730407715,
+          "timestamp": 1791956194.2149887,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 4013,
+        "completion_tokens": 61,
+        "cached_tokens": 0,
+        "total_tokens": 4074
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 23.338260173797607,
+        "timestamp": 1791956194.1598716,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 5,
+      "source": "agent",
+      "message": "In `solve_dependencies`, I see:\n\n```python\n        elif (\\n            use_sub_dependant.is_gen_callable or use_sub_dependant.is_async_gen_callable\\n        ):\\n            use_astack = request_astack\\n            if sub_dependant.scope == \\\"function\\\":\\n                use_astack = function_astack\\n            solved = await _solve_generator(\\n                dependant=use_sub_dependant,\\n                stack=use_astack,\\n                sub_values=solved_result.values,\\n            )\\n        elif use_sub_dependant.is_coroutine_callable:\\n            solved = await call(**solved_result.values)\\n        else:\\n            solved = await run_in_threadpool(call, **solved_result.values)\\n```\n\nThe `use_sub_dependant` object has properties like `is_gen_callable`, `is_async_gen_callable`, and `is_coroutine_callable`. These are likely determined when the `Dependant` object is created.\n\nLet's look at `fastapi/dependencies/models.py` to see how `Dependant` is defined and how these properties are calculated.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_9",
+          "function_name": "read_file",
+          "arguments": {
+            "filepath": "fastapi/dependencies/models.py"
+          },
+          "extra": {
+            "elapsed_s": 32.45614218711853,
+            "timestamp": 1791956203.2777536,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/models.py\", \"content\": \"import inspect\\nimport sys\\nfrom dataclasses import dataclass, field\\nfrom functools import cached_property\\nfrom typing import Any, Callable, List, Optional, Sequence, Union\\n\\nfrom fastapi._compat import ModelField\\nfrom fastapi.security.base import SecurityBase\\nfrom fastapi.types import DependencyCacheKey\\nfrom typing_extensions import Literal\\n\\nif sys.version_info >= (3, 13):  # pragma: no cover\\n    from inspect import iscoroutinefunction\\nelse:  # pragma: no cover\\n    from asyncio import iscoroutinefunction\\n\\n\\n@dataclass\\nclass SecurityRequirement:\\n    security_scheme: SecurityBase\\n    scopes: Optional[Sequence[str]] = None\\n\\n\\n@dataclass\\nclass Dependant:\\n    path_params: List[ModelField] = field(default_factory=list)\\n    query_params: List[ModelField] = field(default_factory=list)\\n    header_params: List[ModelField] = field(default_factory=list)\\n    cookie_params: List[ModelField] = field(default_factory=list)\\n    body_params: List[ModelField] = field(default_factory=list)\\n    dependencies: List[\\\"Dependant\\\"] = field(default_factory=list)\\n    security_requirements: List[SecurityRequirement] = field(default_factory=list)\\n    name: Optional[str] = None\\n    call: Optional[Callable[..., Any]] = None\\n    request_param_name: Optional[str] = None\\n    websocket_param_name: Optional[str] = None\\n    http_connection_param_name: Optional[str] = None\\n    response_param_name: Optional[str] = None\\n    background_tasks_param_name: Optional[str] = None\\n    security_scopes_param_name: Optional[str] = None\\n    own_oauth_scopes: Optional[List[str]] = None\\n    parent_oauth_scopes: Optional[List[str]] = None\\n    use_cache: bool = True\\n    path: Optional[str] = None\\n    scope: Union[Literal[\\\"function\\\", \\\"request\\\"], None] = None\\n\\n    @cached_property\\n    def oauth_scopes(self) -> List[str]:\\n        scopes = self.parent_oauth_scopes.copy() if self.parent_oauth_scopes else []\\n        # This doesn't use a set to preserve order, just in case\\n        for scope in self.own_oauth_scopes or []:\\n            if scope not in scopes:\\n                scopes.append(scope)\\n        return scopes\\n\\n    @cached_property\\n    def cache_key(self) -> DependencyCacheKey:\\n        scopes_for_cache = (\\n            tuple(sorted(set(self.oauth_scopes or []))) if self._uses_scopes else ()\\n        )\\n        return (\\n            self.call,\\n            scopes_for_cache,\\n            self.computed_scope or \\\"\\\",\\n        )\\n\\n    @cached_property\\n    def _uses_scopes(self) -> bool:\\n        if self.own_oauth_scopes:\\n            return True\\n        if self.security_scopes_param_name is not None:\\n            return True\\n        for sub_dep in self.dependencies:\\n            if sub_dep._uses_scopes:\\n                return True\\n        return False\\n\\n    @cached_property\\n    def is_gen_callable(self) -> bool:\\n        if inspect.isgeneratorfunction(self.call):\\n            return True\\n        dunder_call = getattr(self.call, \\\"__call__\\\", None)  # noqa: B004\\n        return inspect.isgeneratorfunction(dunder_call)\\n\\n    @cached_property\\n    def is_async_gen_callable(self) -> bool:\\n        if inspect.isasyncgenfunction(self.call):\\n            return True\\n        dunder_call = getattr(self.call, \\\"__call__\\\", None)  # noqa: B004\\n        return inspect.isasyncgenfunction(dunder_call)\\n\\n    @cached_property\\n    def is_coroutine_callable(self) -> bool:\\n        if inspect.isroutine(self.call):\\n            return iscoroutinefunction(self.call)\\n        if inspect.isclass(self.call):\\n            return False\\n        dunder_call = getattr(self.call, \\\"__call__\\\", None)  # noqa: B004\\n        return iscoroutinefunction(dunder_call)\\n\\n    @cached_property\\n    def computed_scope(self) -> Union[str, None]:\\n        if self.scope:\\n            return self.scope\\n        if self.is_gen_callable or self.is_async_gen_callable:\\n            return \\\"request\\\"\\n        return None\", \"start_line\": 1, \"end_line\": 107, \"total_lines\": 107, \"is_truncated\": false}",
+        "extra": {
+          "tool_name": "read_file",
+          "elapsed_s": 32.50926208496094,
+          "timestamp": 1791956203.3308735,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 5894,
+        "completion_tokens": 301,
+        "cached_tokens": 0,
+        "total_tokens": 6195
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 32.45614218711853,
+        "timestamp": 1791956203.2777536,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 6,
+      "source": "agent",
+      "message": "The properties `is_gen_callable`, `is_async_gen_callable`, and `is_coroutine_callable` are defined in `Dependant` class in `fastapi/dependencies/models.py`.\n\nThey use `inspect.isgeneratorfunction`, `inspect.isasyncgenfunction`, and `iscoroutinefunction` (which is `asyncio.iscoroutinefunction` or `inspect.iscoroutinefunction` depending on Python version).\n\nThe issue is that these functions don't look at `__wrapped__`.\n\nThe problem statement says:\n\"This is the issue this PR solves by calling `inspect.unwrap` on the dependency call and using the unwrapped call to determine what type it is.\"\n\nSo I should use `inspect.unwrap(self.call)` before checking if it's a generator or coroutine.\n\nLet's see where to apply this.\n\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self.call):\n            return True\n        dunder_call = getattr(self.call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        if inspect.isasyncgenfunction(self.call):\n            return True\n        dunder_call = getattr(self.call, \"__call__\", None)  # noqa: B004\n        return inspect.isasyncgenfunction(dunder_call)\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self.call):\n            return iscoroutinefunction(self.call)\n        if inspect.isclass(self.call):\n            return False\n        dunder_call = getattr(self.call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nI should unwrap `self.call` first.\n\nWait, if I unwrap `self.call`, I should probably do it once and use it in all three properties. Or just unwrap it inside each property.\n\nLet's see if `inspect.unwrap` is already imported. Yes, `import inspect` is at the top of `fastapi/dependencies/models.py`.\n\nIf I use `inspect.unwrap(self.call)`, it will return the original function if it was wrapped.\n\nLet's try to implement a reproduction script first to confirm the issue.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_12",
+          "function_name": "write_file",
+          "arguments": {
+            "content": "\nfrom functools import cache\nfrom functools import wraps\nfrom typing import Awaitable\nfrom typing import Callable\nfrom typing import Generic\nfrom typing import Iterator\nfrom typing import ParamSpec\nfrom typing import TypeVar\nimport asyncio\n\nfrom fastapi import Depends\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\n\nP = ParamSpec('P')\nT = TypeVar('T')\n\nclass Reawaitable(Generic[T]):\n    __sentinel = object()\n\n    def __init__(self, awaitable: Awaitable[T]) -> None:\n        self.awaitable = awaitable\n        self.result = self.__sentinel\n\n    def __await__(self) -> Iterator[T]:\n        if self.result is self.__sentinel:\n            self.result = yield from self.awaitable.__await__()\n        return self.result\n\ndef reawaitable(func: Callable[P, Awaitable[T]]) -> Callable[P, Reawaitable[T]]:\n    @wraps(func)\n    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Reawaitable[T]:\n        return Reawaitable(func(*args, **kwargs))\n    return wrapper\n\nclass Settings(BaseModel):\n    foo: str = 'bar'\n\napp = FastAPI()\n\n@cache\n@reawaitable\nasync def get_settings() -> Settings:\n    return Settings()\n\n@app.get('/foo')\nasync def foo(settings: Settings = Depends(get_settings)) -> str:\n    return settings.foo\n\nif __name__ == \"__main__\":\n    from fastapi.testclient import TestClient\n    client = TestClient(app)\n    try:\n        response = client.get('/foo')\n        print(f\"Status: {response.status_code}\")\n        print(f\"Body: {response.text}\")\n    except Exception as e:\n        print(f\"Caught exception: {e}\")\n        import traceback\n        traceback.print_exc()\n",
+            "filepath": "/tmp/reproduce_issue.py"
+          },
+          "extra": {
+            "elapsed_s": 65.9605085849762,
+            "timestamp": 1791956236.78212,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"error\", \"error_type\": \"FileWriteError\", \"error_message\": \"Path traversal detected: '/tmp/reproduce_issue.py' escapes workspace root.\"}",
+        "extra": {
+          "tool_name": "write_file",
+          "elapsed_s": 65.96249866485596,
+          "timestamp": 1791956236.78411,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 7426,
+        "completion_tokens": 1055,
+        "cached_tokens": 0,
+        "total_tokens": 8481
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 65.9605085849762,
+        "timestamp": 1791956236.78212,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 7,
+      "source": "agent",
+      "message": "Ah, I cannot write to `/tmp` using `write_file`. I should use `run_command` with a python script or write it to the workspace and then delete it. But the instructions say \"Any scratch script goes in /tmp through run_command\".\n\nWait, `write_file` is for the workspace. For `/tmp` I should use `run_command`.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_15",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 - <<'EOF'\nfrom functools import cache\nfrom functools import wraps\nfrom typing import Awaitable\nfrom typing import Callable\nfrom typing import Generic\nfrom typing import Iterator\nfrom typing import ParamSpec\nfrom typing import TypeVar\nimport asyncio\n\nfrom fastapi import Depends\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\n\nP = ParamSpec('P')\nT = TypeVar('T')\n\nclass Reawaitable(Generic[T]):\n    __sentinel = object()\n\n    def __init__(self, awaitable: Awaitable[T]) -> None:\n        self.awaitable = awaitable\n        self.result = self.__sentinel\n\n    def __await__(self) -> Iterator[T]:\n        if self.result is self.__sentinel:\n            self.result = yield from self.awaitable.__await__()\n        return self.result\n\ndef reawaitable(func: Callable[P, Awaitable[T]]) -> Callable[P, Reawaitable[T]]:\n    @wraps(func)\n    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Reawaitable[T]:\n        return Reawaitable(func(*args, **kwargs))\n    return wrapper\n\nclass Settings(BaseModel):\n    foo: str = 'bar'\n\napp = FastAPI()\n\n@cache\n@reawaitable\nasync def get_settings() -> Settings:\n    return Settings()\n\n@app.get('/foo')\nasync def foo(settings: Settings = Depends(get_settings)) -> str:\n    return settings.foo\n\nif __name__ == \"__main__\":\n    from fastapi.testclient import TestClient\n    client = TestClient(app)\n    try:\n        response = client.get('/foo')\n        print(f\"Status: {response.status_code}\")\n        print(f\"Body: {response.text}\")\n    except Exception as e:\n        print(f\"Caught exception: {e}\")\n        import traceback\n        traceback.print_exc()\nEOF\n"
+          },
+          "extra": {
+            "elapsed_s": 82.87023377418518,
+            "timestamp": 1791956253.6918452,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"Caught exception: 'Reawaitable' object has no attribute 'foo'\\n\", \"stderr\": \"Traceback (most recent call last):\\n  File \\\"<stdin>\\\", line 54, in <module>\\n  File \\\"/opt/task-compatibility/starlette/testclient.py\\\", line 479, in get\\n    return super().get(\\n           ~~~~~~~~~~~^\\n        url,\\n        ^^^^\\n    ...<6 lines>...\\n        extensions=extensions,\\n        ^^^^^^^^^^^^^^^^^^^^^^\\n    )\\n    ^\\n  File \\\"/opt/task-compatibility/httpx/_client.py\\\", line 1053, in get\\n    return self.request(\\n           ~~~~~~~~~~~~^\\n        \\\"GET\\\",\\n        ^^^^^^\\n    ...<7 lines>...\\n        extensions=extensions,\\n        ^^^^^^^^^^^^^^^^^^^^^^\\n    )\\n    ^\\n  File \\\"/opt/task-compatibility/starlette/testclient.py\\\", line 451, in request\\n    return super().request(\\n           ~~~~~~~~~~~~~~~^\\n        method,\\n        ^^^^^^^\\n    ...<11 lines>...\\n        extensions=extensions,\\n        ^^^^^^^^^^^^^^^^^^^^^^\\n    )\\n    ^\\n  File \\\"/opt/task-compatibility/httpx/_client.py\\\", line 825, in request\\n    return self.send(request, auth=auth, follow_redirects=follow_redirects)\\n           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/task-compatibility/httpx/_client.py\\\", line 914, in send\\n    response = self._send_handling_auth(\\n        request,\\n    ...<2 lines>...\\n        history=[],\\n    )\\n  File \\\"/opt/task-compatibility/httpx/_client.py\\\", line 942, in _send_handling_auth\\n    response = self._send_handling_redirects(\\n        request,\\n        follow_redirects=follow_redirects,\\n        history=history,\\n    )\\n  File \\\"/opt/task-compatibility/httpx/_client.py\\\", line 979, in _send_handling_redirects\\n    response = self._send_single_request(request)\\n  File \\\"/opt/task-compatibility/httpx/_client.py\\\", line 1014, in _send_single_request\\n    response = transport.handle_request(request)\\n  File \\\"/opt/task-compatibility/starlette/testclient.py\\\", line 354, in handle_request\\n    raise exc\\n  File \\\"/opt/task-compatibility/starlette/testclient.py\\\", line 351, in handle_request\\n    portal.call(self.app, scope, receive, send)\\n    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/opt/task-compatibility/anyio/from_thread.py\\\", line 340, in call\\n    return cast(T_Retval, self.start_task_soon(func, *args).result())\\n                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^\\n  File \\\"/usr/local/lib/python3.13/concurrent/futures/_base.py\\\", line 460, in result\\n    return self.__get_result()\\n           ~~~~~~~~~~~~~~~~~^^\\n  File \\\"/usr/local/lib/python3.13/concurrent/futures/_base.py\\\", line 402, in __get_result\\n    raise self._exception\\n  File \\\"/opt/task-compatibility/anyio/from_thread.py\\\", line 265, in _call_func\\n    retval = await retval_or_awaitable\\n             ^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"/workspace/fastapi/applications.py\\\", line 1139, in __call__\\n    await super().__call__(scope, receive, send)\\n  File \\\"/opt/task-compatibility/starlette/applications.py\\\", line 113, in __call__\\n    await self.middleware_stack(scope, receive, send)\\n  File \\\"/opt/task-compatibility/starlette/middleware/errors.py\\\", line 186, in __call__\\n    raise exc\\n  File \\\"/opt/task-compatibility/starlette/middleware/errors.py\\\", line 164, in __call__\\n    await self.app(scope, receive, _send)\\n  File \\\"/opt/task-compatibility/starlette/middleware/exceptions.py\\\", line 63, in __call__\\n    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)\\n  File \\\"/opt/task-compatibility/starlette/_exception_handler.py\\\", line 53, in wrapped_app\\n    raise exc\\n  File \\\"/opt/task-compatibility/starlette/_exception_handler.py\\\", line 42, in wrapped_app\\n    await app(scope, receive, sender)\\n  File \\\"/workspace/fastapi/middleware/asyncexitstack.py\\\", line 18, in __call__\\n    await self.app(scope, receive, send)\\n  File \\\"/opt/task-compatibility/starlette/routing.py\\\", line 716, in __call__\\n    await self.middleware_stack(scope, receive, send)\\n  File \\\"/opt/task-compatibility/starlette/routing.py\\\", line 736, in app\\n    await route.handle(scope, receive, send)\\n  File \\\"/opt/task-compatibility/starlette/routing.py\\\", line 290, in handle\\n    await self.app(scope, receive, send)\\n  File \\\"/workspace/fastapi/routing.py\\\", line 125, in app\\n    await wrap_app_handling_exceptions(app, request)(scope, receive, send)\\n  File \\\"/opt/task-compatibility/starlette/_exception_handler.py\\\", line 53, in wrapped_app\\n    raise exc\\n  File \\\"/opt/task-compatibility/starlette/_exception_handler.py\\\", line 42, in wrapped_app\\n    await app(scope, receive, sender)\\n  File \\\"/workspace/fastapi/routing.py\\\", line 111, in app\\n    response = await f(request)\\n               ^^^^^^^^^^^^^^^^\\n  File \\\"/workspace/fastapi/routing.py\\\", line 391, in app\\n    raw_response = await run_endpoint_function(\\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n    ...<3 lines>...\\n    )\\n    ^\\n  File \\\"/workspace/fastapi/routing.py\\\", line 290, in run_endpoint_function\\n    return await dependant.call(**values)\\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\\n  File \\\"<stdin>\\\", line 48, in foo\\nAttributeError: 'Reawaitable' object has no attribute 'foo'\\n\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 83.73354029655457,
+          "timestamp": 1791956254.5551517,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 8534,
+        "completion_tokens": 552,
+        "cached_tokens": 0,
+        "total_tokens": 9086
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 82.87023377418518,
+        "timestamp": 1791956253.6918452,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 8,
+      "source": "agent",
+      "message": "The reproduction script failed with `AttributeError: 'Reawaitable' object has no attribute 'foo'`, which matches the issue description.\n\nThis happened because `get_settings` was wrapped by `@cache` and `@reawaitable`.\n`@cache` returns a wrapper.\n`@reawaitable` returns a wrapper.\n\nFastAPI's `Dependant.is_coroutine_callable` checked `get_settings` and it was not considered a coroutine function because it's wrapped.\nSo it was called as a regular function: `solved = await run_in_threadpool(call, **solved_result.values)`.\n`run_in_threadpool` just calls the function.\n`get_settings()` returns a `Reawaitable` object.\nThen `foo(settings: Settings = Depends(get_settings))` received the `Reawaitable` object instead of the `Settings` object.\nAnd `settings.foo` failed.\n\nIf FastAPI had recognized it as a coroutine, it would have done `await call()`, and `Reawaitable.__await__` would have been called, returning the `Settings` object.\n\nNow let's fix it in `fastapi/dependencies/models.py`.\n\nI will use `inspect.unwrap(self.call)` in `is_gen_callable`, `is_async_gen_callable`, and `is_coroutine_callable`.\n\nWait, if I unwrap `self.call`, I should also consider the `dunder_call` case.\n\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self.call):\n            return True\n        dunder_call = getattr(self.call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n```\n\nIf `self.call` is wrapped, `inspect.isgeneratorfunction(self.call)` is False.\nIf I use `unwrapped = inspect.unwrap(self.call)`, then `inspect.isgeneratorfunction(unwrapped)` might be True.\n\nWhat about `dunder_call`?\nIf `self.call` is an instance of a class that implements `__call__`, `inspect.unwrap(self.call)` will return the instance itself (unless the instance has `__wrapped__`).\n\nActually, `inspect.unwrap` follows the `__wrapped__` chain.\n\nLet's see how to apply it.\n\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        unwrapped = inspect.unwrap(self.call)\n        if inspect.isgeneratorfunction(unwrapped):\n            return True\n        dunder_call = getattr(unwrapped, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        unwrapped = inspect.unwrap(self.call)\n        if inspect.isasyncgenfunction(unwrapped):\n            return True\n        dunder_call = getattr(unwrapped, \"__call__\", None)  # noqa: B004\n        return inspect.isasyncgenfunction(dunder_call)\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        unwrapped = inspect.unwrap(self.call)\n        if inspect.isroutine(unwrapped):\n            return iscoroutinefunction(unwrapped)\n        if inspect.isclass(unwrapped):\n            return False\n        dunder_call = getattr(unwrapped, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nWait, if `self.call` is a class, `inspect.unwrap(self.call)` will be the class. `inspect.isclass(unwrapped)` will be True.\n\nLet's check if this is correct.\n\nIf `self.call` is a function wrapped by `@cache`, `inspect.unwrap(self.call)` will be the original function.\n`inspect.isroutine(unwrapped)` will be True.\n`iscoroutinefunction(unwrapped)` will be True if it was `async def`.\n\nIf `self.call` is a class, `inspect.unwrap(self.call)` is the class.\n`inspect.isroutine(unwrapped)` is False.\n`inspect.isclass(unwrapped)` is True. Returns False. Correct.\n\nIf `self.call` is an object with `__call__`, `inspect.unwrap(self.call)` is the object.\n`inspect.isroutine(unwrapped)` is False.\n`inspect.isclass(unwrapped)` is False.\n`dunder_call = getattr(unwrapped, \"__call__\", None)`.\n`iscoroutinefunction(dunder_call)` will be True if `__call__` is `async def`.\n\nThis seems correct.\n\nLet's apply the changes.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_18",
+          "function_name": "edit_file",
+          "arguments": {
+            "filepath": "fastapi/dependencies/models.py",
+            "old_string": "    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self.call):\n            return True\n        dunder_call = getattr(self.call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        if inspect.isasyncgenfunction(self.call):\n            return True\n        dunder_call = getattr(self.call, \"__call__\", None)  # noqa: B004\n        return inspect.isasyncgenfunction(dunder_call)\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self.call):\n            return iscoroutinefunction(self.call)\n        if inspect.isclass(self.call):\n            return False\n        dunder_call = getattr(self.call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)",
+            "new_string": "    @cached_property\n    def is_gen_callable(self) -> bool:\n        unwrapped = inspect.unwrap(self.call)\n        if inspect.isgeneratorfunction(unwrapped):\n            return True\n        dunder_call = getattr(unwrapped, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        unwrapped = inspect.unwrap(self.call)\n        if inspect.isasyncgenfunction(unwrapped):\n            return True\n        dunder_call = getattr(unwrapped, \"__call__\", None)  # noqa: B004\n        return inspect.isasyncgenfunction(dunder_call)\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        unwrapped = inspect.unwrap(self.call)\n        if inspect.isroutine(unwrapped):\n            return iscoroutinefunction(unwrapped)\n        if inspect.isclass(unwrapped):\n            return False\n        dunder_call = getattr(unwrapped, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)"
+          },
+          "extra": {
+            "elapsed_s": 137.16977429389954,
+            "timestamp": 1791956307.9913857,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/models.py\", \"occurrences\": 1, \"strategy\": \"exact\", \"diff\": \"--- a/fastapi/dependencies/models.py\\n+++ b/fastapi/dependencies/models.py\\n@@ -77,25 +77,28 @@\\n \\n     @cached_property\\n     def is_gen_callable(self) -> bool:\\n-        if inspect.isgeneratorfunction(self.call):\\n+        unwrapped = inspect.unwrap(self.call)\\n+        if inspect.isgeneratorfunction(unwrapped):\\n             return True\\n-        dunder_call = getattr(self.call, \\\"__call__\\\", None)  # noqa: B004\\n+        dunder_call = getattr(unwrapped, \\\"__call__\\\", None)  # noqa: B004\\n         return inspect.isgeneratorfunction(dunder_call)\\n \\n     @cached_property\\n     def is_async_gen_callable(self) -> bool:\\n-        if inspect.isasyncgenfunction(self.call):\\n+        unwrapped = inspect.unwrap(self.call)\\n+        if inspect.isasyncgenfunction(unwrapped):\\n             return True\\n-        dunder_call = getattr(self.call, \\\"__call__\\\", None)  # noqa: B004\\n+        dunder_call = getattr(unwrapped, \\\"__call__\\\", None)  # noqa: B004\\n         return inspect.isasyncgenfunction(dunder_call)\\n \\n     @cached_property\\n     def is_coroutine_callable(self) -> bool:\\n-        if inspect.isroutine(self.call):\\n-            return iscoroutinefunction(self.call)\\n-        if inspect.isclass(self.call):\\n+        unwrapped = inspect.unwrap(self.call)\\n+        if inspect.isroutine(unwrapped):\\n+            return iscoroutinefunction(unwrapped)\\n+        if inspect.isclass(unwrapped):\\n             return False\\n-        dunder_call = getattr(self.call, \\\"__call__\\\", None)  # noqa: B004\\n+        dunder_call = getattr(unwrapped, \\\"__call__\\\", None)  # noqa: B004\\n         return iscoroutinefunction(dunder_call)\\n \\n     @cached_property\\n\", \"is_truncated\": false}",
+        "extra": {
+          "tool_name": "edit_file",
+          "elapsed_s": 137.38484954833984,
+          "timestamp": 1791956308.206461,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 10756,
+        "completion_tokens": 1717,
+        "cached_tokens": 0,
+        "total_tokens": 12473
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 137.16977429389954,
+        "timestamp": 1791956307.9913857,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 9,
+      "source": "agent",
+      "message": "Now let's run the reproduction script again to see if it works.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_21",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 - <<'EOF'\nfrom functools import cache\nfrom functools import wraps\nfrom typing import Awaitable\nfrom typing import Callable\nfrom typing import Generic\nfrom typing import Iterator\nfrom typing import ParamSpec\nfrom typing import TypeVar\nimport asyncio\n\nfrom fastapi import Depends\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\n\nP = ParamSpec('P')\nT = TypeVar('T')\n\nclass Reawaitable(Generic[T]):\n    __sentinel = object()\n\n    def __init__(self, awaitable: Awaitable[T]) -> None:\n        self.awaitable = awaitable\n        self.result = self.__sentinel\n\n    def __await__(self) -> Iterator[T]:\n        if self.result is self.__sentinel:\n            self.result = yield from self.awaitable.__await__()\n        return self.result\n\ndef reawaitable(func: Callable[P, Awaitable[T]]) -> Callable[P, Reawaitable[T]]:\n    @wraps(func)\n    def wrapper(*args: P.args, **kwargs: P.kwargs) -> Reawaitable[T]:\n        return Reawaitable(func(*args, **kwargs))\n    return wrapper\n\nclass Settings(BaseModel):\n    foo: str = 'bar'\n\napp = FastAPI()\n\n@cache\n@reawaitable\nasync def get_settings() -> Settings:\n    return Settings()\n\n@app.get('/foo')\nasync def foo(settings: Settings = Depends(get_settings)) -> str:\n    return settings.foo\n\nif __name__ == \"__main__\":\n    from fastapi.testclient import TestClient\n    client = TestClient(app)\n    try:\n        response = client.get('/foo')\n        print(f\"Status: {response.status_code}\")\n        print(f\"Body: {response.text}\")\n    except Exception as e:\n        print(f\"Caught exception: {e}\")\n        import traceback\n        traceback.print_exc()\nEOF\n"
+          },
+          "extra": {
+            "elapsed_s": 153.40410470962524,
+            "timestamp": 1791956324.225716,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"Status: 200\\nBody: \\\"bar\\\"\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 154.04760909080505,
+          "timestamp": 1791956324.8692205,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 13060,
+        "completion_tokens": 487,
+        "cached_tokens": 0,
+        "total_tokens": 13547
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 153.40410470962524,
+        "timestamp": 1791956324.225716,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 10,
+      "source": "agent",
+      "message": "The reproduction script now passes!\n\nI should also check if this change breaks anything else.\nThe `Dependant` class is used throughout FastAPI for dependency injection.\nBy unwrapping the call, we are essentially saying \"if this function is wrapped, check if the original function is a coroutine/generator\".\n\nThis seems to be exactly what was requested.\n\nOne detail: `inspect.unwrap` was introduced in Python 3.5, so it should be available.\n\nLet's double check if there are any other places where `self.call` is used without unwrapping and if they should be unwrapped.\n\nIn `Dependant.cache_key`:\n```python\n    @cached_property\n    def cache_key(self) -> DependencyCacheKey:\n        scopes_for_cache = (\n            tuple(sorted(set(self.oauth_scopes or []))) if self._uses_scopes else ()\n        )\n        return (\n            self.call,\n            scopes_for_cache,\n            self.computed_scope or \"\",\n        )\n```\nHere `self.call` is used as part of the cache key. If we use `inspect.unwrap(self.call)`, we might change the cache key. But usually, if you wrap a function, you want the cache key to be based on the original function. However, if you have two different wrappers around the same function, they might be intended to be different dependencies.\n\nBut the issue specifically mentioned `solve_dependencies` and determining if it's a coroutine or generator.\n\nThe problem statement says:\n\"This is the issue this PR solves by calling `inspect.unwrap` on the dependency call and using the unwrapped call to determine what type it is.\"\n\nIt doesn't mention changing the cache key.\n\nLet's check if `computed_scope` is affected.\n```python\n    @cached_property\n    def computed_scope(self) -> Union[str, None]:\n        if self.scope:\n            return self.scope\n        if self.is_gen_callable or self.is_async_gen_callable:\n            return \"request\"\n        return None\n```\n`computed_scope` depends on `is_gen_callable` and `is_async_gen_callable`, which I have updated to use `inspect.unwrap`. This is correct.\n\nI think the changes I made are sufficient and correct according to the problem statement.\n\nFinal check of the changes:\n- `is_gen_callable`: uses `inspect.unwrap(self.call)`\n- `is_async_gen_callable`: uses `inspect.unwrap(self.call)`\n- `is_coroutine_callable`: uses `inspect.unwrap(self.call)`\n\nAll three now correctly identify wrapped coroutines/generators.\n\nI'll submit the patch.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_24",
+          "function_name": "submit_patch",
+          "arguments": {},
+          "extra": {
+            "elapsed_s": 177.15410494804382,
+            "timestamp": 1791956347.9757164,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"patch_size\": 1743, \"files_changed\": 1}",
+        "extra": {
+          "tool_name": "submit_patch",
+          "elapsed_s": 177.2717833518982,
+          "timestamp": 1791956348.0933948,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 13596,
+        "completion_tokens": 624,
+        "cached_tokens": 0,
+        "total_tokens": 14220
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 177.15410494804382,
+        "timestamp": 1791956347.9757164,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 11,
+      "source": "agent",
+      "message": "I have implemented the requested change by using `inspect.unwrap` in `Dependant.is_gen_callable`, `Dependant.is_async_gen_callable`, and `Dependant.is_coroutine_callable` in `fastapi/dependencies/models.py`. I verified the fix with a reproduction script that was failing before and now passes.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "metrics": {
+        "prompt_tokens": 14257,
+        "completion_tokens": 257,
+        "cached_tokens": 0,
+        "total_tokens": 14514
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 185.1229546070099,
+        "timestamp": 1791956355.944566,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 12,
+      "source": "agent",
+      "message": "The issue was that FastAPI's dependency resolution did not consider the `__wrapped__` attribute of dependency callables, causing wrapped async dependencies (e.g., those using `functools.cache`) to be treated as synchronous functions. This resulted in the wrapper object being passed to the endpoint instead of the awaited result.\n\nI fixed this by applying `inspect.unwrap()` to the dependency call in `Dependant.is_gen_callable`, `Dependant.is_async_gen_callable`, and `Dependant.is_coroutine_callable` within `fastapi/dependencies/models.py`. This ensures that FastAPI correctly identifies the underlying function's type even when it is wrapped by decorators.\n\nVerified the fix with a reproduction script using `@cache` and a custom `reawaitable` decorator, which now correctly returns the expected value.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "final",
+        "elapsed_s": 185.1229546070099,
+        "timestamp": 1791956355.944566,
+        "author": "swe_agent"
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 81233,
+    "total_completion_tokens": 5230,
+    "total_cached_tokens": 0,
+    "total_tokens": 86463,
+    "total_steps": 12
+  }
+}
