@@ -122,8 +122,10 @@ def main() -> None:
     ap.add_argument("--max-prompt-tokens", type=int, default=16384)
     ap.add_argument("--reasoning-field", default="reasoning_content")
     ap.add_argument("--keep-meta", action="store_true")
+    ap.add_argument("--task-file", help="Only include these task ids (e.g. the training split)")
     args = ap.parse_args()
 
+    allowed = set(open(args.task_file).read().split()) if args.task_file else None
     candidates = []
     reasons = collections.Counter()
     for out_dir in args.out_dirs:
@@ -131,6 +133,9 @@ def main() -> None:
             job = json.load(open(js))
             arm = job["arm"]
             if args.arms and arm not in args.arms:
+                continue
+            if allowed is not None and job["task_id"] not in allowed:
+                reasons["not_in_task_file"] += 1
                 continue
             if not job.get("resolved"):
                 reasons["not_resolved"] += 1
