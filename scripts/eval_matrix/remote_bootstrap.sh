@@ -19,7 +19,11 @@ case "$phase" in
     cp "$M"/scripts/*.py "$M"/scripts/*.sh "$M"/
     chmod +x "$M"/*.sh
     if [ ! -f "$HOME/official_up/official.lock" ]; then
-      python3 -I "$M/split_lock.py" "$M/serving_requirements.lock" "$D/wheels" "$HOME/official_up"
+      # Official wheelhouse on the disk plus organizer builds absent from PyPI (bundle wheels/extra).
+      rm -rf "$HOME/wh_all" && mkdir -p "$HOME/wh_all"
+      ln -s "$D"/wheels/*.whl "$HOME/wh_all/"
+      cp "$M"/wheels/extra/*.whl "$HOME/wh_all/" 2>/dev/null || true
+      python3 -I "$M/split_lock.py" "$M/serving_requirements.lock" "$HOME/wh_all" "$HOME/official_up"
     fi
     bash "$M/vm_setup.sh" 2>&1 | tee -a "$M/setup.log"
     ;;
