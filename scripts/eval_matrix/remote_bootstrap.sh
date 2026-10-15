@@ -4,6 +4,7 @@
 #   remote_bootstrap.sh setup      # extract bundle, build the pinned env, load sandbox image
 #   remote_bootstrap.sh serve      # start 4 vLLM replicas and wait until ready
 #   remote_bootstrap.sh matrix     # launch the two matrix rounds under nohup
+#   remote_bootstrap.sh resume     # after a preemption: drop interrupted jobs, relaunch matrix
 set -euo pipefail
 M=$HOME/matrix
 D=$HOME/competition/competition_data
@@ -28,6 +29,17 @@ case "$phase" in
       echo "replica $i ready"
     done
     grep -h "GPU KV cache size" "$M"/logs/vllm_*.log | head -4 || true
+    ;;
+  resume)
+    # A job dir with a claim but no job_summary.json was interrupted; remove it so the
+    # runner re-claims it. Completed jobs are kept. Then relaunch both rounds.
+    n=0
+    for c in $(find "$M/out" -name claim 2>/dev/null); do
+      d=$(dirname "$c")
+      if [ ! -f "$d/job_summary.json" ]; then rm -rf "$d"; n=$((n+1)); fi
+    done
+    echo "removed $n interrupted job dirs"
+    exec bash "$0" matrix
     ;;
   matrix)
     source "$M/.venv/bin/activate"
