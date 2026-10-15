@@ -106,7 +106,25 @@ thinking budget, thinking off, analyzer or graph tools.
 Compute ask: ≈45 GPU-h A100 spot (~$225) + Fireworks ~$50–150 over four weeks. The prior $100
 authorization covered the previous line of work only.
 
-## T3a harvest: COMPLETE (2026-10-15 17:44–20:55 UTC) — training set built; SFT job needs a manual command
+## Anchor result (ref 57214360 scored 2026-10-15 ~23:00 UTC): 0.12 = 7/58 — and why
+
+The decision rule said ≤10 → investigate. Investigation outcome: **our submission path is fine;
+the baseline assumption was wrong.** The flexonafft `budget-aware v2` notebook states in its own
+header that *"this candidate has not been scored"* (the author's scored variant got 0.18); the
+"public 0.22" label was honghanhhh's unverified attribution, and the 19-team 0.22 cluster is not
+evidence for these bytes. Our static FILES→zip reconstruction is exactly what the notebook builds.
+Scoring has not changed (10-15 submissions still reach 0.20–0.24, max 0.24 at 01:42 UTC). The top
+teams run something other than the public notebooks.
+
+**Exchange rate, now with two points:** A_recipe 36/95 local → 9/58 public; v2 34/95 local →
+7/58. Public ≈ 0.35–0.4 × local. The hidden repositories are far harder for this model than
+FastAPI/Rich, and no locally measurable prompt change bridges that; even a perfect local score
+would map to roughly 0.20. The LoRA (T3) can only reach 0.30 if what it learns transfers across
+repositories — tool discipline, early edits, exact-string contracts — rather than FastAPI
+knowledge. Treat the held-out FastAPI/Rich gate as necessary, not sufficient; the public score is
+the only test of transfer.
+
+## T3a harvest: COMPLETE (2026-10-15 17:44–20:55 UTC) — training set built; SFT job running
 
 **Result:** 570 runs (T1 protocol, temperature 0.7, 6 samples × 95 tasks), **218 resolved
 (38.2%)**, per sample 38/35/38/34/35/38 — stable at the T1 rate, so the harvest is the planned
