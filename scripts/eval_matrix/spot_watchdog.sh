@@ -3,8 +3,13 @@
 # capacity errors), bring the vLLM replicas back, and resume the matrix.
 # Prints one line per event; exits when the matrix reports MATRIX_DONE.
 #   spot_watchdog.sh VM ZONE [PROJECT] [POLL_SECONDS]
+# Env overrides: DONE_FILE (default ~/matrix/matrix_s1.log), DONE_MARK (MATRIX_DONE),
+#   RESUME_CMD (default: remote_bootstrap.sh serve && resume).
 set -u
 V=$1; Z=$2; P=${3:-ai-coe-454404}; POLL=${4:-120}
+DONE_FILE=${DONE_FILE:-'~/matrix/matrix_s1.log'}
+DONE_MARK=${DONE_MARK:-MATRIX_DONE}
+RESUME_CMD=${RESUME_CMD:-'timeout 1200 bash ~/matrix/remote_bootstrap.sh serve >/dev/null 2>&1 && bash ~/matrix/remote_bootstrap.sh resume'}
 log() { echo "$(date -u +%FT%TZ) $*"; }
 status() { gcloud compute instances describe "$V" --project "$P" --zone "$Z" --format='value(status)' 2>/dev/null; }
 rssh() { gcloud compute ssh "$V" --project "$P" --zone "$Z" --quiet --command "$1" 2>/dev/null; }
@@ -23,15 +28,14 @@ recover() {
   done
   until rssh true; do sleep 15; done
   log "SSH_READY; starting replicas"
-  rssh 'timeout 1200 bash ~/matrix/remote_bootstrap.sh serve >/dev/null 2>&1 && bash ~/matrix/remote_bootstrap.sh resume' \
-    && log "RESUMED" || log "RESUME_FAILED"
+  rssh "$RESUME_CMD" && log "RESUMED" || log "RESUME_FAILED"
 }
 
 while :; do
   st=$(status)
   case "$st" in
     RUNNING)
-      if rssh 'grep -q MATRIX_DONE ~/matrix/matrix_s1.log 2>/dev/null'; then
+      if rssh "grep -q $DONE_MARK $DONE_FILE 2>/dev/null"; then
         log "MATRIX_DONE $(rssh 'tail -1 ~/matrix/out/progress.log' | cut -c1-200)"; exit 0
       fi
       ;;
