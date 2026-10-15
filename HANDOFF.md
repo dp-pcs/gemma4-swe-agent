@@ -1,3 +1,119 @@
+# Session handoff — 2026-10-15
+
+## Where we stopped
+
+Ref 57163806 (the earlier honghanhhh prompt) scored **0.15 = 9/58 public tasks**: above the 0.12
+incumbent, below the field's plateau. No new submission was made this session. It produced the
+failure anatomy of the 380 preserved runs, byte-exact reconstructions of the two current public
+recipes, and the experiment plan below, whose goal is 0.30 (= 18/58).
+
+## Facts established this session
+
+- **Public LB = 58 tasks, score = floor(k/58 × 100)/100.** All 14 distinct scores across 2,809
+  teams lie on that lattice (0.01, 0.03, 0.05, 0.06, 0.08, 0.10, 0.12, 0.13, 0.15, 0.17, 0.18,
+  0.20, 0.22, 0.24); two public notebooks reach the same conclusion independently. Leaders: 14/58
+  (0.24, 2 teams); 13/58 (0.22, 19 teams); 12 (0.20, 57); 11 (0.18, 215). **0.30 requires 18/58**
+  (17 displays as 0.29). Hidden tasks come from private repositories, none of the four public ones.
+- **Identical bytes vary by SD ≈ 2 tasks** (public ledgers: 5→4, 5→4, 5→8 near-identical; ours
+  0.08→0.12 = 5→7). One submission cannot resolve a ±2-task change.
+- **Our submitted prompt is a superseded revision.** honghanhhh's notebook is now "v3" =
+  flexonafft `budget-aware-coding-agent-v2` (the 0.22 cluster's recipe) + three prompt edits
+  (pytest.ini/conftest protected, apply to every parallel implementation, `git status --short`
+  before submit). Both rebuilt byte-exact with provenance: `submission_build/flexonafft_v2_20261015/`
+  (zip sha 53714f0e…) and `submission_build/honghanhhh_v3_20261015/` (zip sha ed31ecf5…).
+  `scripts/build_from_notebook.py` now resolves `json.loads(...)` and variable-referenced FILES.
+  Both v2/v3 register the three graph tools in `agent.yaml` while the prompt forbids using them.
+- **Public sweeps say the sampling knobs are noise** (temperature, top_p, thinking 2048–6144:
+  ±0–3 tasks on 129 tasks), while disabling thinking halves the score and dropping thought
+  summaries costs a third. Do not spend submissions there. No LoRA result has been published; one
+  notebook (sauravbellam) has an RFT data pipeline and no training.
+
+## Failure anatomy of the 380 runs (`results/eval_matrix_20261014/out/`)
+
+- The 95 tasks are bimodal: 26 solved in all 4 arms, 47 in none, 22 flip. Pass@4 = 48/95 against
+  pass@1 37–39.
+- Resolve rate by gold-patch size (A arm): ≤5 lines 21/32, 6–15 11/22, 16–40 3/18, 41–100 2/11,
+  >100 0/12. 17 of the 47 never-solved tasks have >50-line gold patches — out of reach for any
+  scaffold.
+- A arm's 58 failures: right file, wrong fix 16 (4 exact-string contracts absent from the issue,
+  5 missed a second change in the same file, 6 wrong root cause, 1 harmful extra edit); partial
+  files 9; wrong files 11; patch breaks imports 9 (all large new-feature tasks); empty 13. In every
+  failure only the task's new tests fail — zero regressions.
+- **Tool-call reliability is the largest cheap loss.** `edit_file` succeeded on 657/1154 calls
+  (57%); 361 (31%) arrived malformed because the tool-call serialization shreds `old_string` on
+  `:` (harness reply: "mandatory input parameters are not present: old_string"). By arm: A 62%,
+  B 50%, C think2k 48%, D edit-recover 71% — less thinking worsens formatting; D's single fallback
+  line halves malformed calls. `write_file` succeeded on 15/201 (7%): 155 were `/tmp/...` paths
+  the tool rejects as path traversal, each burning a call.
+- **Empties (56 across arms; 21 on tasks another arm solved):** 27 attempted their first edit only
+  after the 28-call cap (13–19 read_file + 10–18 run_command first), 16 never attempted an edit,
+  4 looped one malformed edit until the wall clock, 4 lost the last calls to old_string misses,
+  4 to rejected /tmp writes. The "edit by call 12" rule is not followed.
+- Latency is model generation, not tools: edit_file 12 s, write_file 19 s, run_command 5.3 s,
+  read_file 2.9 s per call. Resolved runs land the first edit at call ~10 / 121 s; unresolved at
+  call 15 / 211 s. Only 17 pytest invocations in 95 A runs; local checks were mostly ad-hoc scripts
+  that exited 0 without exercising the hidden test's case.
+
+## Plan to 0.30 — tests in order
+
+The exchange rate is the unknown: A_recipe is 37/95 locally and 9/58 publicly. Until T0
+calibrates it, assume public ≈ 0.4–0.55 × local, so 18/58 needs roughly 55–60/95 locally — near
+the ceiling the gold-size table implies. The levers below must stack; the realistic landing zone
+is 0.24–0.31.
+
+**T0 — Re-anchor on the field's validated recipe.** (a) Submit `flexonafft_v2_20261015`
+byte-exact after a pinned-SDK compile check. Expect 12–13/58. ≥12: the pipeline is fine and the
+v2 config is the new base. ≤10: something systematic in our submission path — stop and investigate
+before anything else. (b) Local paired screen A_recipe vs v2 vs v3, 95 tasks, 1 sample each
+(≈9 GPU-h, ≈$45): two local↔public points for the exchange rate, and picks v2 vs v3 as the base
+prompt. (c) Day 2: submit v3 if its local result ≥ v2.
+
+**T1 — Tool-call reliability arm** (prompt + tool list; 2 samples ≈ 6 GPU-h). On the base: remove
+`write_file` from `tools`; edit protocol = `edit_file` with a ≤3-line colon-free `old_string` when
+possible, otherwise a `run_command` Python heredoc with an exact-once assertion as the primary
+path; scratch files only via `run_command` into /tmp; first edit by call 8; one `get_status` after
+call 6. Expected: malformed edits 31% → <10%, empties −4 to −6/95, resolved +3 to +5/95. Promote at
+paired W−L ≥ +4 over 2 samples with sign-test p < 0.1.
+
+**T2 — Reviewer stage** (`SequentialAgent` [solver → reviewer]; 2 samples ≈ 6 GPU-h). The
+reviewer (read_file, run_command, edit_file, submit_patch; sees history) runs `git status --short
+&& git diff`, re-derives the issue contract, checks for a missed parallel/second change and stray
+files, makes ≤1 corrective edit, guarantees a non-empty diff, submits. Targets the 5 incomplete,
+1 harmful-extra, 5 stray-file and the stopped-without-edit cases: +2 to +4/95. Risk: starved when
+the solver spends all 28 calls (35/56 empties ended at the cap) — run only on top of T1.
+
+**T3 — LoRA rejection-sampling SFT** (the lever the field has not used; 3–5 weeks, ≈$300–450).
+(a) Harvest with the post-T1 base at temperature 0.7, 6 samples × 103 sound tasks (95 + 7 requests
++ 1 httpx) ≈ 620 runs ≈ 20 GPU-h; capture exact request/response payloads at the proxy (reuse the
+2026-10-13 transport capture); keep resolved, ≤3 per task, fewest calls first, ≤16K tokens,
+well-formed calls only → expect 150–200 trajectories. (b) Train: Fireworks managed SFT on
+`gemma-4-31b-it` (listed tunable; LoRA rank ≤32; OpenAI chat JSONL with tools, tool_calls and
+reasoning_content; $3/M training tokens ≈ $25 per run); `firectl model download` → PEFT
+safetensors (harness: rank ≤128, <3 GiB). Fallback on base-mismatch symptoms: self-hosted PEFT on
+`google/gemma-4-31B-it-qat-q4_0-unquantized` (the bf16 QAT twin), 2×A100-80GB. (c) Gates: G1 the
+adapter loads under vLLM `--lora-modules` on the w4a16 model, 12 tasks, tool-call format intact;
+G2 paired 95-task, 2 samples, ≥ +5 over base; G3 held-out split (train on 60% of tasks, test on
+40% + requests/httpx) ≥ +3/38. Submit only past G3. Expected +5–10/95 local (format reliability,
+early edits), +2–4/58 public. If G2 passes, grow the data 5–10× with SWE-smith-style synthetic
+tasks on the four public repos.
+
+**T4 — Submission discipline.** One per day, SD ≈ 2 tasks: submit only anchors (T0) and candidates
+with 2-sample paired evidence ≥ +4. Keep 8 min / 28 calls / 240 s (12-hour cap; `timeout_seconds`
+may still bound the grading pytest on the scorer). Final two picks: safest + most different (public
+order carries to private only ~50–80% of the time). Not worth submissions: temperature, top_p,
+thinking budget, thinking off, analyzer or graph tools.
+
+Compute ask: ≈45 GPU-h A100 spot (~$225) + Fireworks ~$50–150 over four weeks. The prior $100
+authorization covered the previous line of work only.
+
+## Cloud, authorization and safety
+
+No compute was used this session. `gemma-agent-dev` (id 8178724251330271494) remains TERMINATED
+with its 300GB disk (id 7820791868839024902); nothing else runs in `ai-coe-454404`. Never delete
+the original VM/disk.
+
+---
+
 # Session handoff — 2026-10-14
 
 ## Where we stopped

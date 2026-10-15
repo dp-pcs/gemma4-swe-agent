@@ -869,3 +869,27 @@ verify fresh bytes and use a new dated upload directory with basename `submissio
   official wheelhouse (they are not byte-identical to PyPI).
 - 2.59 GPU-hours on 4xA100 Spot (one preemption, resumed) of the authorized $100, about $13.
   All new resources deleted and verified absent; original VM/disk untouched.
+
+### Score, failure anatomy and plan to 0.30, 2026-10-15
+
+- **Ref 57163806 scored 0.15.** The public LB is 58 tasks scored `floor(k/58 × 100)/100`: every
+  one of the 14 distinct scores across 2,809 teams lies on that lattice, so 0.15 = 9/58, the
+  19-team 0.22 cluster = 13, the two 0.24 leaders = 14, and **0.30 requires 18/58**. Identical
+  bytes vary by SD ≈ 2 tasks (public ledgers and our own 0.08→0.12 pair).
+- The prompt we submitted was a since-replaced honghanhhh revision; the notebook is now "v3" =
+  flexonafft `budget-aware-coding-agent-v2` (the 0.22 cluster) + three prompt edits. Both rebuilt
+  byte-exact: `submission_build/flexonafft_v2_20261015/` and `submission_build/honghanhhh_v3_20261015/`.
+  `scripts/build_from_notebook.py` now resolves `json.loads` and variable-referenced FILES.
+- **Failure anatomy of the 380 preserved runs** (details in `HANDOFF.md` 2026-10-15): tasks are
+  bimodal (26 always, 47 never, 22 flip; pass@4 48/95); resolve rate collapses with gold-patch size
+  (≤5 lines 21/32 … >100 lines 0/12); A arm's 58 failures split 16 right-file-wrong-fix / 9
+  partial / 11 wrong file / 9 import-breaking / 13 empty, with zero regressions. `edit_file`
+  succeeds on only 57% of calls — 31% arrive malformed because `old_string` is shredded on `:` by
+  the tool-call serialization (A 62%, B 50%, C 48%, D 71%) — and `write_file` on 7% (155/201
+  rejected `/tmp` paths). 27 of 56 empties attempted their first edit only after the 28-call cap.
+- **Plan**: T0 re-anchor (submit v2 byte-exact, expect 12–13/58; local A vs v2 vs v3 to calibrate
+  the local↔public exchange rate), T1 tool-call reliability arm (drop `write_file`, heredoc-first
+  edits for colon-containing targets, edit by call 8), T2 `SequentialAgent` reviewer stage, T3 LoRA
+  rejection-sampling SFT (harvest ~620 runs, Fireworks SFT on `gemma-4-31b-it`, gates G1–G3,
+  fallback to the bf16 QAT twin), T4 submission discipline. Public sweeps show sampling and
+  thinking-budget knobs are noise; thinking off halves the score. No compute used this session.
