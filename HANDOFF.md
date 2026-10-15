@@ -106,11 +106,45 @@ thinking budget, thinking off, analyzer or graph tools.
 Compute ask: ≈45 GPU-h A100 spot (~$225) + Fireworks ~$50–150 over four weeks. The prior $100
 authorization covered the previous line of work only.
 
+## Run in progress (started 2026-10-15 06:09 UTC) — and how to resume or tear it down
+
+User authorized the plan's compute (~45 GPU-h + Fireworks) and the T0a upload (ref 57214360,
+PENDING). The T0b/T1 matrix is running on **Spot VM `gemma-matrix-20261015-spot`, zone
+`us-central1-a`** (a2-highgpu-4g, boot disk `gemma-matrix-20261015-disk3` from snapshot
+`gemma-matrix-20261015-snap2`, which holds the fully built environment). Arms: `A_recipe`,
+`V2_budgetaware`, `V3_honghanhhh`, `T1_toolfix` × 95 tasks (round s0), then `V2` and `T1` again
+(round s1). Expected ≈ 4–5 wall-hours; `~/matrix/out/progress.log` carries the per-arm tally and
+`~/matrix/matrix_s1.log` ends with `MATRIX_DONE`.
+
+- Resume after a preemption: `gcloud compute instances start` the VM, then on it
+  `bash ~/matrix/remote_bootstrap.sh serve && bash ~/matrix/remote_bootstrap.sh resume`
+  (`scripts/eval_matrix/spot_watchdog.sh VM ZONE` does this automatically; it was running
+  locally under Monitor).
+- Collect: rsync `~/matrix/out`, `~/matrix/logs`, `~/matrix/*.log`, `gpu_matrix_start_utc.txt`
+  into `results/eval_matrix_20261015/`; run `scripts/eval_matrix/analyze.py out --baseline
+  V2_budgetaware`.
+- Tear down (only after collection): VM `gemma-matrix-20261015-spot` (us-central1-a), disks
+  `gemma-matrix-20261015-disk3` (us-central1-a) and `gemma-matrix-20261015-disk` (us-central1-c,
+  superseded), snapshots `gemma-matrix-20261015-snap` and `-snap2`. Verify with prefix-filtered
+  lists. Never touch `gemma-agent-dev` or its disk.
+
+What went wrong on the way (all fixed; recipe in `scripts/eval_matrix/remote_bootstrap.sh`):
+Spot in us-central1-c was preempted twice within 17 minutes, each ~3 minutes after the GPUs came
+under load; on-demand a2-highgpu-4g was stocked out in all nine zones tried (us-central1-a/b/c/f,
+us-east1-b, us-west1-b, us-west4-b, europe-west4-a/b) around 05:40–06:00 UTC; Spot in
+us-central1-a was available. Two launch bugs: the bundled `swegemma-0.2.11` wheel was the older
+build (sha `63f054a3…`, no `verification_timeout_seconds`) — the correct re-release is
+`results/runtime_20261012_wheel/` (sha `9ad87658…`); and macOS AppleDouble `._*` files in the
+tarball made `adk_submission` reject every job — build bundles with `COPYFILE_DISABLE=1`. Only
+`vllm==0.19.1` and `safetensors==0.8.0` in the serving lock are official-wheelhouse builds absent
+from PyPI; they are in `results/consumer_verification_20261013/deployment.tar`.
+
 ## Cloud, authorization and safety
 
-No compute was used this session. `gemma-agent-dev` (id 8178724251330271494) remains TERMINATED
-with its 300GB disk (id 7820791868839024902); nothing else runs in `ai-coe-454404`. Never delete
-the original VM/disk.
+Authorized this session: ≈45 GPU-h A100 + $50–150 Fireworks for T0b/T1/T2/T3. Spent so far:
+≈1.5 VM-hours of a2-highgpu-4g (setup, two preempted starts) plus the running matrix. Protected
+original: `gemma-agent-dev` (id 8178724251330271494) TERMINATED with its 300GB disk (id
+7820791868839024902) — never delete.
 
 ---
 
