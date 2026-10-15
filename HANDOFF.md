@@ -106,11 +106,43 @@ thinking budget, thinking off, analyzer or graph tools.
 Compute ask: ≈45 GPU-h A100 spot (~$225) + Fireworks ~$50–150 over four weeks. The prior $100
 authorization covered the previous line of work only.
 
-## T3a harvest: IN PROGRESS (launched 2026-10-15 17:44 UTC; ≈4 h) — resume / collect / tear down
+## T3a harvest: COMPLETE (2026-10-15 17:44–20:55 UTC) — training set built; SFT job needs a manual command
 
-Launched after one preemption during setup (17:31; restarted 17:32, `SETUP_OK` 17:39). The
-built environment is snapshotted as **`gemma-harvest-20261015-envsnap`** — create future VMs
-from it with `--create-disk source-snapshot=gemma-harvest-20261015-envsnap` and skip setup.
+**Result:** 570 runs (T1 protocol, temperature 0.7, 6 samples × 95 tasks), **218 resolved
+(38.2%)**, per sample 38/35/38/34/35/38 — stable at the T1 rate, so the harvest is the planned
+size. 48/95 tasks solved at least once, 47 never. Successes: 143 on the 57 training tasks (30
+distinct), 75 on the 38 held-out tasks (18 distinct). Everything is under
+`results/harvest_20261015/` (out/, logs, `sft_train.jsonl`, `sft_eval.jsonl`, task splits).
+
+**Training data (built, uploaded, validated):**
+- `sft_train.jsonl` — 113 clean examples from 33 training-split tasks (harvest + both matrices,
+  cap 4/task, no malformed/post-budget tool results, ≤16K context; median 38 messages, 17 tool
+  calls, 14.4K tokens). Mixed system prompts (T1 family 63, V2 19, A-family 28, V3 3) — kept for
+  volume; all passed the clean-tool-call filter. Fireworks dataset `swe-rft-h1` (READY, 1.66M tok).
+- `sft_eval.jsonl` — 38 examples from 19 held-out tasks, for loss monitoring only. Fireworks
+  dataset `swe-rft-h1-eval` (READY, 609K tok). Held-out leakage into train: 0 (checked).
+
+**Blocker — the SFT job must be created by a human:** Fireworks' current `firectl` (1.8.x)
+refuses mutating commands when run inside an AI agent for account `trilogy`; the Homebrew
+`firectl` 1.7.22 is too old (sends a deprecated `gradient_accumulation_steps` default that
+managed training rejects). Run in a normal terminal (after `sudo firectl upgrade`, or with a
+fresh binary from `https://storage.googleapis.com/fireworks-public/firectl/stable/darwin-arm64.gz`):
+```
+firectl sftj create --base-model accounts/fireworks/models/gemma-4-31b-it --dataset swe-rft-h1 \
+  --evaluation-dataset swe-rft-h1-eval --output-model swe-rft-h1-lora --display-name swe-rft-h1 \
+  --epochs 2 --lora-rank 32 --max-context-length 32768
+```
+Then: `firectl sftj get <job>` until COMPLETED (read-only, fine from an agent); `firectl model
+download accounts/trilogy/models/swe-rft-h1-lora <dir>` → PEFT `adapter_config.json` +
+`adapter_model.safetensors`; gate **G1**: load under vLLM `--lora-modules` on the w4a16 model
+(VM from `gemma-harvest-20261015-envsnap`, no setup needed), run 12 tasks, tool calls well-formed;
+**G2/G3**: paired held-out screen (38 tasks × 3 samples, T1 prompt at 0.2, adapter vs none;
+promote only on a clear win on *held-out* tasks). Expected training cost ≈ $10 (≈3.3M tokens).
+
+Infra: one preemption during setup (17:31) and one at 20:41 with 19 jobs left (watchdog restarted
+the VM; its Monitor expired mid-recovery so the resume was finished by hand). VM and disk deleted
+20:58; **`gemma-harvest-20261015-envsnap` (built environment) and `gemma-harvest-20261015-snap` are
+kept** — create future VMs with `--create-disk source-snapshot=gemma-harvest-20261015-envsnap`.
 
 User approved T3 ("go for it"). Harvest agent `T1_harvest` = T1 protocol at temperature 0.7
 (`submission_build/t1_harvest_20261015/`), **6 samples × 95 tasks = 570 runs**, ≈4 wall-hours
