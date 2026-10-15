@@ -66,7 +66,7 @@ def main() -> None:
     ap.add_argument("--dropout", type=float, default=0.05)
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--max-len", type=int, default=16384)
+    ap.add_argument("--max-len", type=int, default=24576)
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--seed", type=int, default=20261015)
     ap.add_argument("--dry-run", action="store_true")
@@ -92,17 +92,64 @@ def main() -> None:
         return
 
     import torch
+    import torch.nn.functional as F
     from peft import LoraConfig, get_peft_model
-    from transformers import AutoModelForCausalLM, get_cosine_schedule_with_warmup
+    from transformers import AutoConfig, AutoModelForCausalLM, get_cosine_schedule_with_warmup
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa"
-    )
+    cfg = AutoConfig.from_pretrained(args.model)
+    print("architectures:", getattr(cfg, "architectures", None))
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa"
+        )
+    except Exception as e:  # multimodal checkpoint without a causal-LM mapping
+        print("AutoModelForCausalLM failed:", str(e)[:200], "-> trying AutoModelForImageTextToText")
+        from transformers import AutoModelForImageTextToText
+
+        model = AutoModelForImageTextToText.from_pretrained(
+            args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa"
+        )
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.enable_input_require_grads()
     model.config.use_cache = False
+
+    def find_body_and_head(m):
+        """Locate the decoder body (returns hidden states) and the LM head."""
+        head = m.get_output_embeddings()
+        for path in ("model.language_model", "language_model.model", "language_model", "model"):
+            obj = m
+            try:
+                for part in path.split("."):
+                    obj = getattr(obj, part)
+            except AttributeError:
+                continue
+            if hasattr(obj, "layers") or hasattr(obj, "embed_tokens"):
+                print("decoder body:", path, type(obj).__name__)
+                return obj, head
+        raise SystemExit("could not locate the decoder body; inspect the model class")
+
+    def supervised_loss(peft_model, ids, labels):
+        """Cross-entropy only at supervised positions, lm_head applied in chunks (262K vocab)."""
+        base = peft_model.get_base_model()
+        body, head = find_body_and_head.cache if hasattr(find_body_and_head, "cache") else find_body_and_head(base)
+        find_body_and_head.cache = (body, head)
+        dev = next(body.parameters()).device
+        x = torch.tensor([ids], device=dev)
+        hidden = body(input_ids=x).last_hidden_state[0]  # [T, H]
+        # position t predicts token t+1
+        tgt_pos = [t for t in range(len(ids) - 1) if labels[t + 1] != -100]
+        if not tgt_pos:
+            return None, 0
+        pos = torch.tensor(tgt_pos, device=hidden.device)
+        tgt = torch.tensor([labels[t + 1] for t in tgt_pos], device=head.weight.device)
+        h = hidden.index_select(0, pos).to(head.weight.device)
+        total = torch.zeros((), device=head.weight.device, dtype=torch.float32)
+        for s in range(0, h.shape[0], 1024):
+            logits = head(h[s: s + 1024]).float()
+            total = total + F.cross_entropy(logits, tgt[s: s + 1024], reduction="sum")
+        return total, len(tgt_pos)
     lcfg = LoraConfig(
         r=args.rank, lora_alpha=args.alpha, lora_dropout=args.dropout, bias="none", task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -124,10 +171,10 @@ def main() -> None:
         tot, n = 0.0, 0
         with torch.no_grad():
             for ids, labels in evals:
-                out = model(input_ids=torch.tensor([ids], device=first_device),
-                            labels=torch.tensor([labels], device=first_device))
-                k = sum(1 for x in labels if x != -100)
-                tot += out.loss.item() * k
+                loss_sum, k = supervised_loss(model, ids, labels)
+                if loss_sum is None:
+                    continue
+                tot += loss_sum.item()
                 n += k
         model.train()
         return tot / max(n, 1)
@@ -144,15 +191,15 @@ def main() -> None:
         random.shuffle(order)
         for bi in range(0, len(order), args.grad_accum):
             batch = order[bi: bi + args.grad_accum]
-            tok_count = sum(sum(1 for x in train[i][1] if x != -100) for i in batch)
+            tok_count = sum(sum(1 for x in train[i][1][1:] if x != -100) for i in batch)
             loss_sum = 0.0
             for i in batch:
                 ids, labels = train[i]
-                out = model(input_ids=torch.tensor([ids], device=first_device),
-                            labels=torch.tensor([labels], device=first_device))
-                k = sum(1 for x in labels if x != -100)
-                (out.loss * k / max(tok_count, 1)).backward()
-                loss_sum += out.loss.item() * k
+                ls, k = supervised_loss(model, ids, labels)
+                if ls is None:
+                    continue
+                (ls / max(tok_count, 1)).backward()
+                loss_sum += ls.item()
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
             sched.step()
