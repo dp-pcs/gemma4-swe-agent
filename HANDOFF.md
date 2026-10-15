@@ -144,6 +144,8 @@ distinct), 75 on the 38 held-out tasks (18 distinct). Everything is under
 
 **SFT job bem0ovcd FAILED at 23:23 UTC** after 52 min with "Internal error occurred, please contact the Fireworks AI team": no metrics were written and no output model exists, so it never reached training. Suspects: platform/initialization problem, or the Gemma 4 trainer rejecting the tool-calling + `reasoning_content` format at template-render time (upload validation passed). Fallback datasets with the reasoning folded into `content` are built: `results/harvest_20261015/sft_train_content.jsonl` / `sft_eval_content.jsonl`. Retry (user must run; mutating): new output name, lower memory (`--max-context-length 16384 --batch-size-samples 2`).
 
+**Retry running: job `swe-rft-h1b` (d5zex1qh), created by the user 2026-10-15 23:32 UTC** — output `accounts/trilogy/models/swe-rft-h1b-lora`, `--batch-size-samples 4`, otherwise identical. G1 task list: `results/harvest_20261015/g1_tasks.txt` (8 held-out tasks the base solves ≥5/6, 4 it solves 1–3/6).
+
 **Original job (created by the user at 2026-10-15 22:31 UTC after `sudo firectl upgrade`):**
 `accounts/trilogy/supervisedFineTuningJobs/bem0ovcd` → output model
 `accounts/trilogy/models/swe-rft-h1-lora` (rank 32, 2 epochs, 32K context, eval set attached).
