@@ -106,7 +106,11 @@ thinking budget, thinking off, analyzer or graph tools.
 Compute ask: ≈45 GPU-h A100 spot (~$225) + Fireworks ~$50–150 over four weeks. The prior $100
 authorization covered the previous line of work only.
 
-## T3a harvest: IN PROGRESS (started 2026-10-15 ~17:30 UTC) — resume / collect / tear down
+## T3a harvest: IN PROGRESS (launched 2026-10-15 17:44 UTC; ≈4 h) — resume / collect / tear down
+
+Launched after one preemption during setup (17:31; restarted 17:32, `SETUP_OK` 17:39). The
+built environment is snapshotted as **`gemma-harvest-20261015-envsnap`** — create future VMs
+from it with `--create-disk source-snapshot=gemma-harvest-20261015-envsnap` and skip setup.
 
 User approved T3 ("go for it"). Harvest agent `T1_harvest` = T1 protocol at temperature 0.7
 (`submission_build/t1_harvest_20261015/`), **6 samples × 95 tasks = 570 runs**, ≈4 wall-hours
