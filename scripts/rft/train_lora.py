@@ -1,0 +1,178 @@
+"""Self-hosted LoRA SFT for the Gemma 4 31B agent on OpenAI-style tool-calling JSONL.
+
+Renders each example with the model's own chat template (tools + reasoning_content +
+tool messages), computes assistant-only loss masks by incremental rendering, and trains
+a PEFT LoRA on the bf16 QAT twin (google/gemma-4-31B-it-qat-q4_0-unquantized) sharded
+across all visible GPUs with device_map="auto". Saves a PEFT adapter directory
+(adapter_config.json + adapter_model.safetensors) that vLLM can load as a LoRA module.
+
+Usage:
+  python train_lora.py --model /path/to/gemma4-bf16 --train sft_train.jsonl \
+      [--eval sft_eval.jsonl] --out adapter_out [--rank 32] [--alpha 64] [--epochs 2] \
+      [--lr 1e-4] [--max-len 16384] [--grad-accum 8] [--dry-run]
+  --dry-run only renders/masks the data and prints statistics (CPU, tokenizer only).
+"""
+
+import argparse
+import json
+import math
+import os
+import random
+import time
+from pathlib import Path
+
+
+def render_example(tok, ex, max_len):
+    """Return (input_ids, labels) with labels masked to assistant turns, or None if too long."""
+    msgs, tools = ex["messages"], ex.get("tools")
+    full = tok.apply_chat_template(msgs, tools=tools, tokenize=False)
+    ids = tok(full, add_special_tokens=False)["input_ids"]
+    if len(ids) > max_len:
+        return None
+    labels = [-100] * len(ids)
+    # Incremental rendering: the tokens contributed by assistant message k are the suffix of
+    # render(msgs[:k+1]) beyond render(msgs[:k]) (minus any trailing generation prompt).
+    prev_len = 0
+    for k, m in enumerate(msgs):
+        upto = tok.apply_chat_template(msgs[: k + 1], tools=tools, tokenize=False)
+        cur_len = len(tok(upto, add_special_tokens=False)["input_ids"])
+        if m["role"] == "assistant":
+            for i in range(prev_len, min(cur_len, len(ids))):
+                labels[i] = ids[i]
+        prev_len = cur_len
+    return ids, labels
+
+
+def load_examples(tok, path, max_len):
+    rows = [json.loads(l) for l in open(path)]
+    out, dropped = [], 0
+    for ex in rows:
+        r = render_example(tok, ex, max_len)
+        if r is None:
+            dropped += 1
+            continue
+        out.append(r)
+    return out, dropped
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", required=True)
+    ap.add_argument("--train", required=True)
+    ap.add_argument("--eval")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--rank", type=int, default=32)
+    ap.add_argument("--alpha", type=int, default=64)
+    ap.add_argument("--dropout", type=float, default=0.05)
+    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--max-len", type=int, default=16384)
+    ap.add_argument("--grad-accum", type=int, default=8)
+    ap.add_argument("--seed", type=int, default=20261015)
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    from transformers import AutoTokenizer
+
+    tok = AutoTokenizer.from_pretrained(args.model)
+    train, dropped = load_examples(tok, args.train, args.max_len)
+    lens = sorted(len(i) for i, _ in train)
+    sup = [sum(1 for x in l if x != -100) for _, l in train]
+    print(f"train: {len(train)} examples ({dropped} dropped > {args.max_len} tokens); tokens min {lens[0]} "
+          f"median {lens[len(lens)//2]} max {lens[-1]}; supervised tokens/example median {sorted(sup)[len(sup)//2]} "
+          f"({100*sum(sup)/sum(lens):.0f}% of tokens)")
+    evals = []
+    if args.eval:
+        evals, edrop = load_examples(tok, args.eval, args.max_len)
+        print(f"eval: {len(evals)} examples ({edrop} dropped)")
+    if args.dry_run:
+        ids, labels = train[0]
+        first = next(i for i, x in enumerate(labels) if x != -100)
+        print("first supervised span starts at token", first, "->", repr(tok.decode(ids[first:first + 40])))
+        return
+
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForCausalLM, get_cosine_schedule_with_warmup
+
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa"
+    )
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    model.enable_input_require_grads()
+    model.config.use_cache = False
+    lcfg = LoraConfig(
+        r=args.rank, lora_alpha=args.alpha, lora_dropout=args.dropout, bias="none", task_type="CAUSAL_LM",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    )
+    model = get_peft_model(model, lcfg)
+    model.print_trainable_parameters()
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.0, betas=(0.9, 0.999))
+    steps_per_epoch = math.ceil(len(train) / args.grad_accum)
+    total = steps_per_epoch * args.epochs
+    sched = get_cosine_schedule_with_warmup(opt, num_warmup_steps=max(1, total // 10), num_training_steps=total)
+    first_device = next(model.parameters()).device
+
+    def run_eval():
+        if not evals:
+            return None
+        model.eval()
+        tot, n = 0.0, 0
+        with torch.no_grad():
+            for ids, labels in evals:
+                out = model(input_ids=torch.tensor([ids], device=first_device),
+                            labels=torch.tensor([labels], device=first_device))
+                k = sum(1 for x in labels if x != -100)
+                tot += out.loss.item() * k
+                n += k
+        model.train()
+        return tot / max(n, 1)
+
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+    log = open(Path(args.out) / "train_log.jsonl", "a")
+    e0 = run_eval()
+    print(f"eval loss before training: {e0}")
+    log.write(json.dumps({"step": 0, "eval_loss": e0}) + "\n")
+    model.train()
+    step, t0 = 0, time.time()
+    for epoch in range(args.epochs):
+        order = list(range(len(train)))
+        random.shuffle(order)
+        for bi in range(0, len(order), args.grad_accum):
+            batch = order[bi: bi + args.grad_accum]
+            tok_count = sum(sum(1 for x in train[i][1] if x != -100) for i in batch)
+            loss_sum = 0.0
+            for i in batch:
+                ids, labels = train[i]
+                out = model(input_ids=torch.tensor([ids], device=first_device),
+                            labels=torch.tensor([labels], device=first_device))
+                k = sum(1 for x in labels if x != -100)
+                (out.loss * k / max(tok_count, 1)).backward()
+                loss_sum += out.loss.item() * k
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            opt.step()
+            sched.step()
+            opt.zero_grad(set_to_none=True)
+            step += 1
+            rec = {"step": step, "epoch": epoch, "train_loss": loss_sum / max(tok_count, 1),
+                   "lr": sched.get_last_lr()[0], "elapsed_s": round(time.time() - t0)}
+            log.write(json.dumps(rec) + "\n")
+            log.flush()
+            if step % 5 == 0 or step == total:
+                print(json.dumps(rec), flush=True)
+        e = run_eval()
+        print(f"epoch {epoch} done: eval loss {e}", flush=True)
+        log.write(json.dumps({"step": step, "epoch": epoch, "eval_loss": e}) + "\n")
+        log.flush()
+        model.save_pretrained(Path(args.out) / f"epoch{epoch}")
+    model.save_pretrained(args.out)
+    tok.save_pretrained(args.out)
+    print("saved adapter to", args.out, os.listdir(args.out))
+
+
+if __name__ == "__main__":
+    main()
