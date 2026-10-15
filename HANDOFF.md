@@ -106,6 +106,31 @@ thinking budget, thinking off, analyzer or graph tools.
 Compute ask: ≈45 GPU-h A100 spot (~$225) + Fireworks ~$50–150 over four weeks. The prior $100
 authorization covered the previous line of work only.
 
+## T3a harvest: IN PROGRESS (started 2026-10-15 ~17:30 UTC) — resume / collect / tear down
+
+User approved T3 ("go for it"). Harvest agent `T1_harvest` = T1 protocol at temperature 0.7
+(`submission_build/t1_harvest_20261015/`), **6 samples × 95 tasks = 570 runs**, ≈4 wall-hours
+on **Spot VM `gemma-harvest-20261015-spot`, zone `us-central1-a`**, boot disk
+`gemma-harvest-20261015-disk` (from snapshot `gemma-harvest-20261015-snap` of the original;
+the environment was rebuilt on it with `remote_bootstrap.sh setup`). requests/httpx tasks are
+deferred until a second sandbox image exists.
+
+- Launch (after `SETUP_OK` in `~/bootstrap_setup.log`): `bash ~/matrix/remote_bootstrap.sh serve`
+  then `SAMPLES=6 bash ~/matrix/run_round.sh 0 T1_harvest`; progress in `~/matrix/out/progress.log`,
+  completion marker `MATRIX_DONE_s0` in `~/matrix/matrix_s0.log`.
+- Resume after preemption: start the VM, `serve`, then the same `SAMPLES=6 run_round.sh 0
+  T1_harvest` (it removes interrupted job dirs first). Locally:
+  `DONE_FILE='~/matrix/matrix_s0.log' RESUME_CMD='timeout 1200 bash ~/matrix/remote_bootstrap.sh
+  serve >/dev/null 2>&1 && SAMPLES=6 bash ~/matrix/run_round.sh 0 T1_harvest'
+  scripts/eval_matrix/spot_watchdog.sh gemma-harvest-20261015-spot us-central1-a`.
+- Collect into `results/harvest_20261015/` (out/, logs, matrix_s0.log, serve.log), then build the
+  SFT set: `python3 -I scripts/rft/build_sft_jsonl.py results/harvest_20261015/out --out
+  results/harvest_20261015/sft.jsonl --per-task 3 --keep-meta` (then hold out 40% of tasks before
+  training — bd-dxbi).
+- Tear down after collection: delete the VM and `gemma-harvest-20261015-disk`; **snapshot the
+  built disk first and keep that snapshot** (the matrix snapshot was deleted today and cost a
+  second 25-minute build). Never touch `gemma-agent-dev`.
+
 ## T0b/T1 matrix: completed 2026-10-15 16:07 UTC (760 runs) — T1 not promoted
 
 User authorized the plan's compute (~45 GPU-h + Fireworks) and the T0a upload (**ref 57214360**,
