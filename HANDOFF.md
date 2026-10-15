@@ -122,7 +122,17 @@ distinct), 75 on the 38 held-out tasks (18 distinct). Everything is under
 - `sft_eval.jsonl` — 38 examples from 19 held-out tasks, for loss monitoring only. Fireworks
   dataset `swe-rft-h1-eval` (READY, 609K tok). Held-out leakage into train: 0 (checked).
 
-**Blocker — the SFT job must be created by a human:** Fireworks' current `firectl` (1.8.x)
+**SFT job running (created by the user at 2026-10-15 22:31 UTC after `sudo firectl upgrade`):**
+`accounts/trilogy/supervisedFineTuningJobs/bem0ovcd` → output model
+`accounts/trilogy/models/swe-rft-h1-lora` (rank 32, 2 epochs, 32K context, eval set attached).
+Poll with `firectl sftj get bem0ovcd` (read-only works from an agent). When COMPLETED:
+`firectl model download accounts/trilogy/models/swe-rft-h1-lora <dir>`, then
+`python3 -I scripts/rft/make_lora_arm.py submission_build/t1_toolfix_20261015/source <dir>
+submission_build/g1_lora_h1/source` and serve with `LORA_MODULES='swe_rft_h1=<arm>/adapters/swe_rft_h1'
+bash serve.sh` (hook added to `scripts/eval_matrix/serve.sh`). G2/G3: `run_matrix.py --task-file
+results/harvest_20261015/heldout_tasks.txt --arms T1_toolfix=… G1_lora=… --samples 3`.
+
+**Why the job had to be created by a human:** Fireworks' current `firectl` (1.8.x)
 refuses mutating commands when run inside an AI agent for account `trilogy`; the Homebrew
 `firectl` 1.7.22 is too old (sends a deprecated `gradient_accumulation_steps` default that
 managed training rejects). Run in a normal terminal (after `sudo firectl upgrade`, or with a
