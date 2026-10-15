@@ -94,13 +94,15 @@ def convert(trace_path, reasoning_field):
             if any(b in obs for b in BAD_OBSERVATION):
                 return None, "bad_tool_result"
             tools_used.append(tc["function_name"])
+            # The Gemma 4 chat template (used by Fireworks' renderer) requires `arguments` to be a
+            # JSON object, not the OpenAI-style JSON string; a string fails every render.
             assistant = {
                 "role": "assistant",
                 "content": "",
                 "tool_calls": [{
                     "id": tc.get("tool_call_id") or f"call_{len(messages)}",
                     "type": "function",
-                    "function": {"name": tc["function_name"], "arguments": json.dumps(args, ensure_ascii=False)},
+                    "function": {"name": tc["function_name"], "arguments": args},
                 }],
             }
             if s.get("message"):
