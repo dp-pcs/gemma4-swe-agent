@@ -14,6 +14,8 @@ case "$phase" in
   setup)
     mkdir -p "$M"
     tar -xzf "$HOME/matrix_bundle.tgz" -C "$M"
+    # macOS tar adds AppleDouble files; the submission validator rejects them.
+    find "$M" -name '._*' -delete
     cp "$M"/scripts/*.py "$M"/scripts/*.sh "$M"/
     chmod +x "$M"/*.sh
     if [ ! -f "$HOME/official_up/official.lock" ]; then
