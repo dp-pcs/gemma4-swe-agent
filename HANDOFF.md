@@ -124,6 +124,8 @@ repositories — tool discipline, early edits, exact-string contracts — rather
 knowledge. Treat the held-out FastAPI/Rich gate as necessary, not sufficient; the public score is
 the only test of transfer.
 
+**Decision (user, 2026-10-15 23:20 UTC): hold the 2026-10-16 Kaggle slot for the LoRA** — submit it only if G1 passes and the held-out screen shows a clear paired win; T1 is not submitted.
+
 ## T3a harvest: COMPLETE (2026-10-15 17:44–20:55 UTC) — training set built; SFT job running
 
 **Result:** 570 runs (T1 protocol, temperature 0.7, 6 samples × 95 tasks), **218 resolved
