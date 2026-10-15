@@ -892,4 +892,25 @@ verify fresh bytes and use a new dated upload directory with basename `submissio
   edits for colon-containing targets, edit by call 8), T2 `SequentialAgent` reviewer stage, T3 LoRA
   rejection-sampling SFT (harvest ~620 runs, Fireworks SFT on `gemma-4-31b-it`, gates G1–G3,
   fallback to the bf16 QAT twin), T4 submission discipline. Public sweeps show sampling and
-  thinking-budget knobs are noise; thinking off halves the score. No compute used this session.
+  thinking-budget knobs are noise; thinking off halves the score.
+
+### T0a anchor upload and T0b/T1 matrix, 2026-10-15 (later the same day)
+
+- **Uploaded flexonafft v2 byte-exact as ref 57214360** (zip sha `53714f0e…`, compile-checked
+  with swegemma 0.2.11 / adk-submission 0.2.13); PENDING at session end.
+- **760-run scorer-parity matrix** on 4× A100 Spot (us-central1-a after two preemptions in -c and
+  nine on-demand stockouts): T1 112/285 (39.3%) vs V2 107/285 (37.5%), paired 18W/13L, +5,
+  p = 0.47 — **not promoted**; V3 38/95; A_recipe 35/95 (37 on 10-14). Identical V2 reruns scored
+  37/31/39: local SD ≈ 3 tasks per sample. T1's mechanics confirmed (malformed edits 29% → 6%,
+  timeouts 64 → 51/285) but empties 32 → 41 and wrong patches 81 = 81. All prompt/tool variants
+  are one 36–40% band; the lever left is T3 training, harvesting with T1's clean protocol.
+- Tooling added: `remote_bootstrap.sh` (setup/serve/matrix/resume), `run_round.sh`,
+  `spot_watchdog.sh`, `mechanism_check.py`, `split_lock.py`, `make_t1_arm.py`,
+  `scripts/rft/build_sft_jsonl.py` (resolved traces → OpenAI tool-calling SFT JSONL; 149 → 49
+  clean on the 10-14 corpus). Evidence: `results/eval_matrix_20261015/`.
+- Launch bugs fixed: wrong `swegemma-0.2.11` build (`63f054a3…`; use `9ad87658…` from
+  `results/runtime_20261012_wheel/`); macOS AppleDouble files in arm trees (build bundles with
+  `COPYFILE_DISABLE=1`); organizer `vllm==0.19.1`/`safetensors==0.8.0` wheels come from
+  `results/consumer_verification_20261013/deployment.tar`.
+- ≈24 GPU-h (~$30–35) of the authorized ~45; all matrix resources deleted and verified absent;
+  original VM/disk untouched.

@@ -1,7 +1,30 @@
 # Scorer-parity screen: public v2/v3 recipes and the T1 tool-reliability arm — 2026-10-15
 
-**Status: round s2 (V2, T1) in progress; numbers below cover s0 and s1 (570 runs).** The final
-section will be updated when s2 completes.
+## Final result (three samples of V2 and T1, one of A and V3; 760 runs)
+
+| Arm | Samples | Resolved | Rate | Per sample | Paired vs V2 (W/L, net, sign-test p) |
+| --- | :---: | ---: | ---: | :---: | :---: |
+| T1_toolfix | 3 | 112/285 | 39.3% | 36, 40, 36 | 18/13, +5, **p = 0.47** |
+| V2_budgetaware (baseline; Kaggle ref 57214360, pending) | 3 | 107/285 | 37.5% | 37, 31, 39 | — |
+| V3_honghanhhh | 1 | 38/95 | 40.0% | 38 | 6/5, +1, p = 1.0 |
+| A_recipe (Kaggle 0.15 = 9/58) | 1 (+1 on 10-14) | 35/95 | 36.8% | 35 (37 on 10-14) | 5/7, −2, p = 0.77 |
+
+**T1 is not promoted.** The +8 it showed after two samples came from V2's low draw in s1
+(11W/2L); s2 went 3W/6L the other way. The identical V2 configuration scored 37, 31 and 39 on
+three passes, so the local one-sample standard deviation is about 3 tasks, and every
+prompt/tool configuration tested here sits in one 36–40% band. T1's mechanics are confirmed
+(malformed `edit_file` 29% → 6%, timeouts 64 → 51 of 285) but it trades timeouts for empty
+patches (32 → 41), and the wrong-patch count is identical (81 vs 81). It remains the right
+*harvest* configuration for T3 because its trajectories are clean, and it is never worse than
+V2 — but it earns no submission on this evidence.
+
+Implication for the plan: the prompt/tool lever is exhausted at ~38/95 locally; 18/58 on
+Kaggle needs ~55–60/95. Proceed to T3 (rejection-sampling SFT) with T1's protocol as the
+harvest agent; keep V2 as the submission base until the Kaggle anchor score arrives.
+
+---
+
+The interim notes below were written after s0 and s1 and are kept for the record.
 
 ## Question
 
@@ -79,7 +102,9 @@ jobs shuffled within a sample round. Arms are the exact trees in `arms/`. Runner
 - Preempted 05:04 and 05:21 in us-central1-c; on-demand stocked out in nine zones; Spot found in
   us-central1-a at 06:04 from an incremental snapshot of the built disk. Clean start 06:09.
 - Preempted 07:34; restarted 13:15 by the watchdog (idle gap, no GPU billing while stopped);
-  s0 complete 14:01, s1 complete 15:0x, s2 launched 15:06.
+  s0 complete 14:01, s1 complete 15:06, s2 launched 15:06 and complete 16:07. A gcloud token
+  expiry at 14:54 needed an interactive `gcloud auth login` before collection. All matrix
+  resources deleted 16:12 and verified absent; ≈6 Spot VM-hours (≈24 GPU-h) in total.
 
 ## Artifacts
 

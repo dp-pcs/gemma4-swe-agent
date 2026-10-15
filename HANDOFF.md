@@ -106,27 +106,46 @@ thinking budget, thinking off, analyzer or graph tools.
 Compute ask: ≈45 GPU-h A100 spot (~$225) + Fireworks ~$50–150 over four weeks. The prior $100
 authorization covered the previous line of work only.
 
-## Run in progress (started 2026-10-15 06:09 UTC) — and how to resume or tear it down
+## T0b/T1 matrix: completed 2026-10-15 16:07 UTC (760 runs) — T1 not promoted
 
-User authorized the plan's compute (~45 GPU-h + Fireworks) and the T0a upload (ref 57214360,
-PENDING). The T0b/T1 matrix is running on **Spot VM `gemma-matrix-20261015-spot`, zone
-`us-central1-a`** (a2-highgpu-4g, boot disk `gemma-matrix-20261015-disk3` from snapshot
-`gemma-matrix-20261015-snap2`, which holds the fully built environment). Arms: `A_recipe`,
-`V2_budgetaware`, `V3_honghanhhh`, `T1_toolfix` × 95 tasks (round s0), then `V2` and `T1` again
-(round s1). Expected ≈ 4–5 wall-hours; `~/matrix/out/progress.log` carries the per-arm tally and
-`~/matrix/matrix_s1.log` ends with `MATRIX_DONE`.
+User authorized the plan's compute (~45 GPU-h + Fireworks) and the T0a upload (**ref 57214360**,
+flexonafft v2 byte-exact, still PENDING at session end — check it first; the decision rule is
+≥12/58 → v2 config is the base, ≤10 → investigate our submission path).
 
-- Resume after a preemption: `gcloud compute instances start` the VM, then on it
-  `bash ~/matrix/remote_bootstrap.sh serve && bash ~/matrix/remote_bootstrap.sh resume`
-  (`scripts/eval_matrix/spot_watchdog.sh VM ZONE` does this automatically; it was running
-  locally under Monitor).
-- Collect: rsync `~/matrix/out`, `~/matrix/logs`, `~/matrix/*.log`, `gpu_matrix_start_utc.txt`
-  into `results/eval_matrix_20261015/`; run `scripts/eval_matrix/analyze.py out --baseline
-  V2_budgetaware`.
-- Tear down (only after collection): VM `gemma-matrix-20261015-spot` (us-central1-a), disks
-  `gemma-matrix-20261015-disk3` (us-central1-a) and `gemma-matrix-20261015-disk` (us-central1-c,
-  superseded), snapshots `gemma-matrix-20261015-snap` and `-snap2`. Verify with prefix-filtered
-  lists. Never touch `gemma-agent-dev` or its disk.
+| Arm | Samples | Resolved | Per sample | Paired vs V2 |
+|---|:---:|---:|:---:|:---:|
+| T1_toolfix (V3 + tool-reliability package) | 3 | 112/285 (39.3%) | 36, 40, 36 | 18W/13L, +5, p = 0.47 |
+| V2_budgetaware (0.22-cluster recipe) | 3 | 107/285 (37.5%) | 37, 31, 39 | — |
+| V3_honghanhhh (V2 + 3 prompt edits) | 1 | 38/95 (40.0%) | 38 | 6W/5L, p = 1.0 |
+| A_recipe (our 0.15 = 9/58 bytes) | 1 (+1 on 10-14) | 35/95 (36.8%) | 35 (37) | 5W/7L, p = 0.77 |
+
+- **Local noise is ~3 tasks per 95-task sample** (identical V2 config: 37, 31, 39; 10/95 tasks
+  flipped). One-sample screens are uninformative; two were barely enough, three settled T1.
+- **T1 fails the pre-registered gate** (net ≥ +4 *and* p < 0.1): +5 but p = 0.47. Its mechanics
+  worked as designed — malformed `edit_file` 29% → 6%, zero wasted `write_file`, first edit at
+  call 11–12 vs 14–17, timeouts 64 → 51 of 285 — but empties rose 32 → 41 and the wrong-patch
+  count is identical (81 vs 81). The failure mass is comprehension, not mechanics.
+- **Conclusion: the prompt/tool lever is exhausted at ~38/95 locally.** A, V2, V3 and T1 are
+  statistically one band. 18/58 on Kaggle needs ~55–60/95 locally. The remaining lever is T3
+  (rejection-sampling SFT). Use **T1's protocol as the harvest agent** — its trajectories are
+  clean; `scripts/rft/build_sft_jsonl.py` kept only 49 of 149 resolved 10-14 runs because 92
+  contained malformed tool results, a problem T1 removes. T2 (reviewer stage) is deprioritized:
+  it targets a bucket worth ≤ +4/95 against a noise floor of ±3.
+- 50 of 95 tasks were solved by at least one of the 760 runs; 45 by none (the large-gold-patch
+  core).
+- Full numbers, mechanism tables and chronology: `results/eval_matrix_20261015/RESULTS.md`;
+  all job outputs and traces under `results/eval_matrix_20261015/out/s{0,1,2}/`.
+
+Next session, in order: (1) read the ref 57214360 score and apply the decision rule; (2) decide
+tomorrow's slot — recommended low-regret use is T1 (never worse than V2 locally, and it is the
+harvest configuration, so its public score calibrates the harvest) — or hold if the anchor
+disappoints; (3) build T3a: harvest ~620 runs (T1 protocol, temperature 0.7, 6 samples × 103
+sound tasks incl. requests/httpx — needs the second sandbox image), convert with
+`build_sft_jsonl.py`, then Fireworks SFT (bd-dl9m, bd-dxbi).
+
+Infrastructure for the next run is scripted end to end: `scripts/eval_matrix/remote_bootstrap.sh`
+(setup/serve/matrix/resume), `run_round.sh N ARM...`, `spot_watchdog.sh` (round-aware via
+DONE_FILE/DONE_MARK/RESUME_CMD), `mechanism_check.py`. Build bundles with `COPYFILE_DISABLE=1`.
 
 What went wrong on the way (all fixed; recipe in `scripts/eval_matrix/remote_bootstrap.sh`):
 Spot in us-central1-c was preempted twice within 17 minutes, each ~3 minutes after the GPUs came
@@ -141,10 +160,12 @@ from PyPI; they are in `results/consumer_verification_20261013/deployment.tar`.
 
 ## Cloud, authorization and safety
 
-Authorized this session: ≈45 GPU-h A100 + $50–150 Fireworks for T0b/T1/T2/T3. Spent so far:
-≈1.5 VM-hours of a2-highgpu-4g (setup, two preempted starts) plus the running matrix. Protected
-original: `gemma-agent-dev` (id 8178724251330271494) TERMINATED with its 300GB disk (id
-7820791868839024902) — never delete.
+Authorized this session: ≈45 GPU-h A100 + $50–150 Fireworks for T0b/T1/T2/T3. Spent: about
+6 Spot VM-hours of a2-highgpu-4g (≈24 GPU-h, roughly $30–35; two 300 GB disks and two snapshots
+for under a day) — settled billing not queried. All matrix resources (VM `gemma-matrix-20261015-spot`,
+disks `-disk`/`-disk3`, snapshots `-snap`/`-snap2`) were deleted at 16:12 UTC and prefix-filtered
+lists verified empty. Protected original: `gemma-agent-dev` (id 8178724251330271494) TERMINATED
+with its 300GB disk (id 7820791868839024902) READY — never delete.
 
 ---
 
