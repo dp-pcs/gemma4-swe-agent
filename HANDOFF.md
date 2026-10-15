@@ -131,9 +131,16 @@ deferred until a second sandbox image exists.
   SFT set: `python3 -I scripts/rft/build_sft_jsonl.py results/harvest_20261015/out --out
   results/harvest_20261015/sft.jsonl --per-task 3 --keep-meta` (then hold out 40% of tasks before
   training — bd-dxbi).
-- Tear down after collection: delete the VM and `gemma-harvest-20261015-disk`; **snapshot the
-  built disk first and keep that snapshot** (the matrix snapshot was deleted today and cost a
-  second 25-minute build). Never touch `gemma-agent-dev`.
+- Tear down after collection: delete the VM and `gemma-harvest-20261015-disk`; keep
+  `gemma-harvest-20261015-envsnap`. Never touch `gemma-agent-dev`.
+
+T3b is ready to run the moment the harvest is converted: Fireworks account authenticated
+(`firectl` 1.7.22), base `accounts/fireworks/models/gemma-4-31b-it` is `Supervised LoRA
+Tunable: true`; `scripts/rft/fireworks_sft.sh upload|train|status|download` wraps the job
+(rank 32, 32K context, eval set = `results/harvest_20261015/sft_eval_heldout_existing.jsonl`,
+built only from held-out tasks). Train on `train_tasks.txt` tasks only
+(`build_sft_jsonl.py --task-file results/harvest_20261015/train_tasks.txt`); gate G1 = adapter
+loads under vLLM `--lora-modules` on the w4a16 model with well-formed tool calls on 12 tasks.
 
 ## T0b/T1 matrix: completed 2026-10-15 16:07 UTC (760 runs) — T1 not promoted
 
