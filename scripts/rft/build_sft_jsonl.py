@@ -125,6 +125,7 @@ def main() -> None:
     ap.add_argument("--reasoning-field", default="reasoning_content")
     ap.add_argument("--keep-meta", action="store_true")
     ap.add_argument("--task-file", help="Only include these task ids (e.g. the training split)")
+    ap.add_argument("--max-tool-calls", type=int, help="Drop runs with more tool calls than this (efficiency filter)")
     args = ap.parse_args()
 
     allowed = set(open(args.task_file).read().split()) if args.task_file else None
@@ -152,6 +153,9 @@ def main() -> None:
                 continue
             if example["_meta"]["last_prompt_tokens"] > args.max_prompt_tokens:
                 reasons["too_long"] += 1
+                continue
+            if args.max_tool_calls and example["_meta"]["tool_calls"] > args.max_tool_calls:
+                reasons["too_many_calls"] += 1
                 continue
             candidates.append((job["task_id"], arm, example))
 
