@@ -144,6 +144,8 @@ distinct), 75 on the 38 held-out tasks (18 distinct). Everything is under
 
 **SFT job bem0ovcd FAILED at 23:23 UTC** after 52 min with "Internal error occurred, please contact the Fireworks AI team": no metrics were written and no output model exists, so it never reached training. Suspects: platform/initialization problem, or the Gemma 4 trainer rejecting the tool-calling + `reasoning_content` format at template-render time (upload validation passed). Fallback datasets with the reasoning folded into `content` are built: `results/harvest_20261015/sft_train_content.jsonl` / `sft_eval_content.jsonl`. Retry (user must run; mutating): new output name, lower memory (`--max-context-length 16384 --batch-size-samples 2`).
 
+**TRAINING COMPLETE 05:40 UTC: held-out eval loss 0.458 → 0.163 (epoch 0) → 0.138 (epoch 1).** Final adapter at `~/train/adapter_h1` on the VM and `results/harvest_20261015/adapter_h1_final/` locally (weights gitignored, config + `train_log.jsonl` committed). `run_gates.sh` auto-launched 05:40:35 UTC — follow `~/matrix/gates.log`.
+
 **Timeline (2026-10-16 UTC):** resumed epoch 1 at step 19/24 by 05:02 (train loss ≈0.10–0.16); final eval + save ≈ 06:00; a local waiter launches `run_gates.sh ~/train/adapter_h1` automatically when `saved adapter` appears (gates ≈ 2 h → decision ≈ 08:00 UTC; the 10-16 Kaggle slot is held for the LoRA).
 
 **Preempted 03:32 UTC at step 16/24; the watchdog restarted the VM and resumed epoch 1 from the epoch-0 checkpoint at 03:34 UTC** (resume works as designed). New ETA for the final adapter ≈ 05:45 UTC.
