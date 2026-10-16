@@ -70,6 +70,8 @@ def main() -> None:
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--seed", type=int, default=20261015)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--resume-adapter", help="PEFT adapter dir (e.g. OUT/epoch0) to continue from")
+    ap.add_argument("--start-epoch", type=int, default=0, help="first epoch index to run when resuming")
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
@@ -156,7 +158,13 @@ def main() -> None:
         r=args.rank, lora_alpha=args.alpha, lora_dropout=args.dropout, bias="none", task_type="CAUSAL_LM",
         target_modules=r"^model\.language_model\..*\.(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
     )
-    model = get_peft_model(model, lcfg)
+    if args.resume_adapter:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, args.resume_adapter, is_trainable=True)
+        print("resumed adapter from", args.resume_adapter, "starting at epoch", args.start_epoch)
+    else:
+        model = get_peft_model(model, lcfg)
     model.print_trainable_parameters()
 
     params = [p for p in model.parameters() if p.requires_grad]
@@ -164,6 +172,8 @@ def main() -> None:
     steps_per_epoch = math.ceil(len(train) / args.grad_accum)
     total = steps_per_epoch * args.epochs
     sched = get_cosine_schedule_with_warmup(opt, num_warmup_steps=max(1, total // 10), num_training_steps=total)
+    for _ in range(steps_per_epoch * args.start_epoch):  # advance the schedule past completed epochs
+        sched.step()
     first_device = next(model.parameters()).device
 
     def run_eval():
@@ -183,12 +193,13 @@ def main() -> None:
 
     Path(args.out).mkdir(parents=True, exist_ok=True)
     log = open(Path(args.out) / "train_log.jsonl", "a")
-    e0 = run_eval()
-    print(f"eval loss before training: {e0}")
-    log.write(json.dumps({"step": 0, "eval_loss": e0}) + "\n")
+    if args.start_epoch == 0:
+        e0 = run_eval()
+        print(f"eval loss before training: {e0}")
+        log.write(json.dumps({"step": 0, "eval_loss": e0}) + "\n")
     model.train()
-    step, t0 = 0, time.time()
-    for epoch in range(args.epochs):
+    step, t0 = steps_per_epoch * args.start_epoch, time.time()
+    for epoch in range(args.start_epoch, args.epochs):
         order = list(range(len(train)))
         random.shuffle(order)
         for bi in range(0, len(order), args.grad_accum):
