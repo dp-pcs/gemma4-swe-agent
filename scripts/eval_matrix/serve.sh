@@ -18,7 +18,7 @@ for i in $(seq 0 $((N - 1))); do
     --default-chat-template-kwargs '{"enable_thinking":true}' \
     --no-scheduler-reserve-full-isl \
     --language-model-only --skip-mm-profiling \
-    ${LORA_MODULES:+--enable-lora --max-loras 8 --max-lora-rank 128 --lora-modules $LORA_MODULES} \
+    ${LORA_MODULES:+--enable-lora --max-loras ${LORA_MAX_LORAS:-1} --max-lora-rank ${LORA_MAX_RANK:-32} --lora-modules $LORA_MODULES} \
     --max-num-seqs 8 --max-num-batched-tokens 8192 --cudagraph-capture-sizes 1 2 4 8 \
     > "$M/logs/vllm_$i.log" 2>&1 &
 done
