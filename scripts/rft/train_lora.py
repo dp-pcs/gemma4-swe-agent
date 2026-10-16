@@ -70,6 +70,8 @@ def main() -> None:
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--seed", type=int, default=20261015)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--max-memory-gib", type=float, default=22.0,
+                    help="per-GPU cap for weight sharding; the rest is headroom for activations")
     ap.add_argument("--resume-adapter", help="PEFT adapter dir (e.g. OUT/epoch0) to continue from")
     ap.add_argument("--start-epoch", type=int, default=0, help="first epoch index to run when resuming")
     args = ap.parse_args()
@@ -102,17 +104,18 @@ def main() -> None:
     torch.manual_seed(args.seed)
     cfg = AutoConfig.from_pretrained(args.model)
     print("architectures:", getattr(cfg, "architectures", None))
+    max_memory = {i: f"{args.max_memory_gib}GiB" for i in range(torch.cuda.device_count())}
+    load_kwargs = dict(dtype=torch.bfloat16, device_map="auto", max_memory=max_memory, attn_implementation="sdpa")
+    print("max_memory:", max_memory)
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa"
-        )
+        model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
     except Exception as e:  # multimodal checkpoint without a causal-LM mapping
         print("AutoModelForCausalLM failed:", str(e)[:200], "-> trying AutoModelForImageTextToText")
         from transformers import AutoModelForImageTextToText
 
-        model = AutoModelForImageTextToText.from_pretrained(
-            args.model, dtype=torch.bfloat16, device_map="auto", attn_implementation="sdpa"
-        )
+        model = AutoModelForImageTextToText.from_pretrained(args.model, **load_kwargs)
+    print("device map:", {k: v for k, v in sorted(getattr(model, "hf_device_map", {}).items())
+                          if k.endswith((".layers.0", ".layers.15", ".layers.30", ".layers.45", ".layers.59", "lm_head", "embed_tokens"))})
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.enable_input_require_grads()
     model.config.use_cache = False
