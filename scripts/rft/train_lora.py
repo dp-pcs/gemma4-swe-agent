@@ -150,9 +150,11 @@ def main() -> None:
             logits = head(h[s: s + 1024]).float()
             total = total + F.cross_entropy(logits, tgt[s: s + 1024], reduction="sum")
         return total, len(tgt_pos)
+    # Only the text decoder's projections: the vision/audio towers use Gemma4ClippableLinear
+    # (not an nn.Linear) under the same names, which PEFT cannot wrap and we do not want to train.
     lcfg = LoraConfig(
         r=args.rank, lora_alpha=args.alpha, lora_dropout=args.dropout, bias="none", task_type="CAUSAL_LM",
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=r"^(?!.*(?:vision|audio)).*\.(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
     )
     model = get_peft_model(model, lcfg)
     model.print_trainable_parameters()
