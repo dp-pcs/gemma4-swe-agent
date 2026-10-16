@@ -22,32 +22,55 @@ import time
 from pathlib import Path
 
 
-def render_example(tok, ex, max_len):
-    """Return (input_ids, labels) with labels masked to assistant turns, or None if too long."""
+THINK_RE = None
+
+
+def render_example(tok, ex, max_len, mask_thinking=False):
+    """Return (input_ids, labels) with labels on assistant turns only, or None if too long.
+
+    With mask_thinking, the <|channel>...<channel|> thinking blocks inside assistant turns are
+    excluded from the loss, so training teaches the actions (tool calls, final text) but not the
+    length or content of the reasoning.
+    """
+    global THINK_RE
+    import re
+
+    if THINK_RE is None:
+        THINK_RE = re.compile(r"<\|channel>.*?<channel\|>", re.S)
     msgs, tools = ex["messages"], ex.get("tools")
     full = tok.apply_chat_template(msgs, tools=tools, tokenize=False)
-    ids = tok(full, add_special_tokens=False)["input_ids"]
+    enc = tok(full, add_special_tokens=False, return_offsets_mapping=True)
+    ids, offs = enc["input_ids"], enc["offset_mapping"]
     if len(ids) > max_len:
         return None
-    labels = [-100] * len(ids)
-    # Incremental rendering: the tokens contributed by assistant message k are the suffix of
-    # render(msgs[:k+1]) beyond render(msgs[:k]) (minus any trailing generation prompt).
-    prev_len = 0
+    # Incremental rendering: the characters contributed by assistant message k are the suffix of
+    # render(msgs[:k+1]) beyond render(msgs[:k]).
+    spans, prev = [], 0
     for k, m in enumerate(msgs):
-        upto = tok.apply_chat_template(msgs[: k + 1], tools=tools, tokenize=False)
-        cur_len = len(tok(upto, add_special_tokens=False)["input_ids"])
+        cur = len(tok.apply_chat_template(msgs[: k + 1], tools=tools, tokenize=False))
         if m["role"] == "assistant":
-            for i in range(prev_len, min(cur_len, len(ids))):
-                labels[i] = ids[i]
-        prev_len = cur_len
+            spans.append((prev, cur))
+        prev = cur
+
+    def in_assistant(c):
+        return any(a <= c < b for a, b in spans)
+
+    labels = [ids[i] if in_assistant(s) else -100 for i, (s, e) in enumerate(offs)]
+    if mask_thinking:
+        for mt in THINK_RE.finditer(full):
+            a, b = mt.span()
+            if in_assistant(a):
+                for i, (s, e) in enumerate(offs):
+                    if a <= s < b:
+                        labels[i] = -100
     return ids, labels
 
 
-def load_examples(tok, path, max_len):
+def load_examples(tok, path, max_len, mask_thinking=False):
     rows = [json.loads(l) for l in open(path)]
     out, dropped = [], 0
     for ex in rows:
-        r = render_example(tok, ex, max_len)
+        r = render_example(tok, ex, max_len, mask_thinking)
         if r is None:
             dropped += 1
             continue
@@ -72,6 +95,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-memory-gib", type=float, default=22.0,
                     help="per-GPU cap for weight sharding; the rest is headroom for activations")
+    ap.add_argument("--mask-thinking", action="store_true",
+                    help="exclude <|channel>...<channel|> thinking blocks from the loss (train actions only)")
     ap.add_argument("--resume-adapter", help="PEFT adapter dir (e.g. OUT/epoch0) to continue from")
     ap.add_argument("--start-epoch", type=int, default=0, help="first epoch index to run when resuming")
     args = ap.parse_args()
@@ -79,20 +104,25 @@ def main() -> None:
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    train, dropped = load_examples(tok, args.train, args.max_len)
+    train, dropped = load_examples(tok, args.train, args.max_len, args.mask_thinking)
     lens = sorted(len(i) for i, _ in train)
     sup = [sum(1 for x in l if x != -100) for _, l in train]
     print(f"train: {len(train)} examples ({dropped} dropped > {args.max_len} tokens); tokens min {lens[0]} "
           f"median {lens[len(lens)//2]} max {lens[-1]}; supervised tokens/example median {sorted(sup)[len(sup)//2]} "
-          f"({100*sum(sup)/sum(lens):.0f}% of tokens)")
+          f"({100*sum(sup)/sum(lens):.0f}% of tokens); mask_thinking={args.mask_thinking}")
     evals = []
     if args.eval:
-        evals, edrop = load_examples(tok, args.eval, args.max_len)
+        evals, edrop = load_examples(tok, args.eval, args.max_len, args.mask_thinking)
         print(f"eval: {len(evals)} examples ({edrop} dropped)")
     if args.dry_run:
         ids, labels = train[0]
         first = next(i for i, x in enumerate(labels) if x != -100)
         print("first supervised span starts at token", first, "->", repr(tok.decode(ids[first:first + 40])))
+        if args.mask_thinking:
+            full = tok.decode(ids)
+            n_blocks = len(THINK_RE.findall(full))
+            sup_text = tok.decode([t for t, l in zip(ids, labels) if l != -100][:120])
+            print(f"thinking blocks in example 0: {n_blocks}; supervised text begins: {sup_text[:300]!r}")
         return
 
     import torch

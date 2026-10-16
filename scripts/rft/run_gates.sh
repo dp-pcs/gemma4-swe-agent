@@ -35,7 +35,7 @@ echo GATES_SERVE_OK
 
 source "$M/.venv/bin/activate"
 EP=http://127.0.0.1:8000/v1,http://127.0.0.1:8001/v1,http://127.0.0.1:8002/v1,http://127.0.0.1:8003/v1
-OUT=$M/out_gates
+OUT=${GATES_OUT:-$M/out_gates}
 python "$M/run_matrix.py" --arms G1_lora="$M/arms/G1_lora" --task-file "$M/g1_tasks.txt" --samples 1 \
   --endpoints "$EP" --workers-per-endpoint 3 --data-root "$D" --image swegemma-framework:matrix --out "$OUT" --seed 0
 echo "G1 resolved: $(grep -l '"resolved": true' "$OUT"/s0/G1_lora/*/job_summary.json 2>/dev/null | wc -l)/12"
