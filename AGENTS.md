@@ -914,3 +914,16 @@ verify fresh bytes and use a new dated upload directory with basename `submissio
   `results/consumer_verification_20261013/deployment.tar`.
 - ≈24 GPU-h (~$30–35) of the authorized ~45; all matrix resources deleted and verified absent;
   original VM/disk untouched.
+
+### T3 LoRA v1: harvest, training, gates, 2026-10-15/16
+
+- **Harvest:** 570 runs (T1 at temperature 0.7, 6 × 95), 218 resolved; `sft_train.jsonl` 113 clean examples / 33
+  training tasks, `sft_eval.jsonl` 38 / 19 held-out (`results/harvest_20261015/`).
+- **Fireworks managed SFT failed four times** ("Internal error"): the Gemma 4 chat template needs tool-call
+  `arguments` as JSON objects (fixed), yet attempt 4 failed too → self-hosted.
+- **Self-hosted LoRA** (`scripts/rft/train_lora.py`, bf16 QAT twin sharded over 4× A100-40GB, r=32 on the text
+  decoder, 90 examples at a 20K cap, 2 epochs): held-out token loss 0.458 → 0.138. Preempted once; resumed.
+- **Gates:** adapter loads under vLLM on the w4a16 model (TP=1 needs 1 slot/rank 32 — the scorer's 8/128 starve the
+  KV cache); G1 8/12 with zero malformed calls; **held-out screen 38×3 paired: 29 vs 39 of 114, W5/L15, net −10,
+  p = 0.041 → not promoted.** Cause: longer, slower generations → more empty-at-budget runs. v2 ideas in
+  `results/harvest_20261015/GATES.md`. ≈ 8 Spot VM-hours (~$40); snapshots kept, VM/disk deleted.
