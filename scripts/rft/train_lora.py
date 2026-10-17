@@ -93,8 +93,9 @@ def main() -> None:
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--seed", type=int, default=20261015)
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--max-memory-gib", type=float, default=22.0,
-                    help="per-GPU cap for weight sharding; the rest is headroom for activations")
+    ap.add_argument("--max-memory-gib", default="22",
+                    help="per-GPU cap(s) for weight sharding, one value or a comma list per GPU "
+                         "(e.g. 15,15,15,20); the rest is headroom for activations")
     ap.add_argument("--mask-thinking", action="store_true",
                     help="exclude <|channel>...<channel|> thinking blocks from the loss (train actions only)")
     ap.add_argument("--resume-adapter", help="PEFT adapter dir (e.g. OUT/epoch0) to continue from")
@@ -134,7 +135,11 @@ def main() -> None:
     torch.manual_seed(args.seed)
     cfg = AutoConfig.from_pretrained(args.model)
     print("architectures:", getattr(cfg, "architectures", None))
-    max_memory = {i: f"{args.max_memory_gib}GiB" for i in range(torch.cuda.device_count())}
+    caps = [float(x) for x in str(args.max_memory_gib).split(",")]
+    n_gpu = torch.cuda.device_count()
+    if len(caps) == 1:
+        caps = caps * n_gpu
+    max_memory = {i: f"{caps[i]}GiB" for i in range(n_gpu)}
     load_kwargs = dict(dtype=torch.bfloat16, device_map="auto", max_memory=max_memory, attn_implementation="sdpa")
     print("max_memory:", max_memory)
     try:
