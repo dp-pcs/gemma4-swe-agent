@@ -1,0 +1,180 @@
+diff --git a/fastapi/exceptions.py b/fastapi/exceptions.py
+index 0620428b..ff4e533d 100644
+--- a/fastapi/exceptions.py
++++ b/fastapi/exceptions.py
+@@ -154,6 +154,19 @@ class DependencyScopeError(FastAPIError):
+     """
+ 
+ 
++
++class EndpointContext:
++    def __init__(self, method: str, path: str, function_name: str, filepath: str, line_number: int):
++        self.method = method
++        self.path = path
++        self.function_name = function_name
++        self.filepath = filepath
++        self.line_number = line_number
++
++    def __str__(self) -> str:
++        return f"Endpoint: {self.method} {self.path} ({self.function_name} at {self.filepath}:{self.line_number})"
++
++
+ class ValidationException(Exception):
+     def __init__(self, errors: Sequence[Any]) -> None:
+         self._errors = errors
+@@ -163,22 +176,45 @@ class ValidationException(Exception):
+ 
+ 
+ class RequestValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, context: Optional['EndpointContext'] = None) -> None:
+         super().__init__(errors)
+         self.body = body
++        self.context = context
++
++    def __str__(self) -> str:
++        message = f"{len(self._errors)} validation errors:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        if self.context:
++            message += f"Endpoint: {self.context}\n"
++        return message
+ 
+ 
+ class WebSocketRequestValidationError(ValidationException):
+-    pass
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, context: Optional['EndpointContext'] = None) -> None:
++        super().__init__(errors)
++        self.body = body
++        self.context = context
++
++    def __str__(self) -> str:
++        message = f"{len(self._errors)} validation errors:\n"
++        for err in self._errors:
++            message += f"  {err}\n"
++        if self.context:
++            message += f"Endpoint: {self.context}\n"
++        return message
+ 
+ 
+ class ResponseValidationError(ValidationException):
+-    def __init__(self, errors: Sequence[Any], *, body: Any = None) -> None:
++    def __init__(self, errors: Sequence[Any], *, body: Any = None, context: Optional['EndpointContext'] = None) -> None:
+         super().__init__(errors)
+         self.body = body
++        self.context = context
+ 
+     def __str__(self) -> str:
+         message = f"{len(self._errors)} validation errors:\n"
+         for err in self._errors:
+             message += f"  {err}\n"
++        if self.context:
++            message += f"Endpoint: {self.context}\n"
+         return message
+diff --git a/fastapi/routing.py b/fastapi/routing.py
+index c10175b1..f9b343ca 100644
+--- a/fastapi/routing.py
++++ b/fastapi/routing.py
+@@ -1,3 +1,4 @@
++from fastapi.exceptions import EndpointContext
+ import dataclasses
+ import email.message
+ import functools
+@@ -215,6 +216,7 @@ def _merge_lifespan_context(
+ async def serialize_response(
+     *,
+     field: Optional[ModelField] = None,
++    context: Optional[EndpointContext] = None,
+     response_content: Any,
+     include: Optional[IncEx] = None,
+     exclude: Optional[IncEx] = None,
+@@ -246,7 +248,7 @@ async def serialize_response(
+             errors.append(errors_)
+         if errors:
+             raise ResponseValidationError(
+-                errors=_normalize_errors(errors), body=response_content
++                errors=_normalize_errors(errors), body=response_content, context=context
+             )
+ 
+         if hasattr(field, "serialize"):
+@@ -287,6 +289,7 @@ async def run_endpoint_function(
+ 
+ 
+ def get_request_handler(
++    route: "APIRoute",
+     dependant: Dependant,
+     body_field: Optional[ModelField] = None,
+     status_code: Optional[int] = None,
+@@ -313,6 +316,12 @@ def get_request_handler(
+ 
+     async def app(request: Request) -> Response:
+         response: Union[Response, None] = None
++        info = route.get_endpoint_info()
++        context = EndpointContext(
++            method=request.method,
++            path=route.path,
++            **info
++        ) if info else None
+         file_stack = request.scope.get("fastapi_middleware_astack")
+         assert isinstance(file_stack, AsyncExitStack), (
+             "fastapi_middleware_astack not found in request scope"
+@@ -414,6 +423,7 @@ def get_request_handler(
+                     exclude_defaults=response_model_exclude_defaults,
+                     exclude_none=response_model_exclude_none,
+                     is_coroutine=is_coroutine,
++                    context=context,
+                 )
+                 response = actual_response_class(content, **response_args)
+                 if not is_body_allowed_for_status_code(response.status_code):
+@@ -421,7 +431,7 @@ def get_request_handler(
+                 response.headers.raw.extend(solved_result.response.headers.raw)
+         if errors:
+             validation_error = RequestValidationError(
+-                _normalize_errors(errors), body=body
++                _normalize_errors(errors), body=body, context=context
+             )
+             raise validation_error
+ 
+@@ -433,11 +443,18 @@ def get_request_handler(
+ 
+ 
+ def get_websocket_app(
++    route: "APIRoute",
+     dependant: Dependant,
+     dependency_overrides_provider: Optional[Any] = None,
+     embed_body_fields: bool = False,
+ ) -> Callable[[WebSocket], Coroutine[Any, Any, Any]]:
+     async def app(websocket: WebSocket) -> None:
++        info = route.get_endpoint_info()
++        context = EndpointContext(
++            method="WEBSOCKET",
++            path=route.path,
++            **info
++        ) if info else None
+         async_exit_stack = websocket.scope.get("fastapi_inner_astack")
+         assert isinstance(async_exit_stack, AsyncExitStack), (
+             "fastapi_inner_astack not found in request scope"
+@@ -646,8 +663,23 @@ class APIRoute(routing.Route):
+         )
+         self.app = request_response(self.get_route_handler())
+ 
++    def get_endpoint_info(self) -> Optional[Dict[str, Any]]:
++        import inspect
++        try:
++            func = self.dependant.call
++            filepath = inspect.getsourcefile(func)
++            lines, start_line = inspect.getsourcelines(func)
++            return {
++                "function_name": func.__name__,
++                "filepath": filepath,
++                "line_number": start_line,
++            }
++        except Exception:
++            return None
++
+     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+         return get_request_handler(
++            route=self,
+             dependant=self.dependant,
+             body_field=self.body_field,
+             status_code=self.status_code,

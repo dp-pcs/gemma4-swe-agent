@@ -28,7 +28,11 @@ Mechanism: with the thinking masked out of the loss, nothing anchors *when to st
 Same adapter, `max_output_tokens: 2048` (T1's legitimate calls: p99 1136, max 2936 tokens; the adapter's
 p99 739), so a loop costs ≤ ~45 s. Run 2026-10-17 22:02 UTC on the same 38 × 3 into `out_gates_v2`
 (pairs with the T1 runs above; the T1 runs were produced under heavier server load, which slightly
-favours this arm). Result: see `gates_analysis_o2k.json` / HANDOFF.
+favours this arm). **Result: 23/114 (20.2%) vs T1 41/114; W 0 / L 18, net −18, p ≈ 0 — still fails.**
+Timeouts fell (50 vs 92 of the uncapped runs) but empty patches rose to 30 and wrong patches to 10; 4.8% of
+calls still hit the (lower) cap and 10 of the first 47 runs exhausted the 28-call budget — shorter loops
+turned into more loops. The v2 weights are degraded in a way no sampling config repairs; **not uploaded**
+(`submission_build/lora_h2o2k_20261017/`, zip sha `dd876455…`, kept for provenance only).
 
 ## v3 candidates (trainer options implemented, dry-run verified, not trained)
 
