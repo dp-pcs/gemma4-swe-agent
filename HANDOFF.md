@@ -144,7 +144,9 @@ distinct), 75 on the 38 held-out tasks (18 distinct). Everything is under
 
 **SFT job bem0ovcd FAILED at 23:23 UTC** after 52 min with "Internal error occurred, please contact the Fireworks AI team": no metrics were written and no output model exists, so it never reached training. Suspects: platform/initialization problem, or the Gemma 4 trainer rejecting the tool-calling + `reasoning_content` format at template-render time (upload validation passed). Fallback datasets with the reasoning folded into `content` are built: `results/harvest_20261015/sft_train_content.jsonl` / `sft_eval_content.jsonl`. Retry (user must run; mutating): new output name, lower memory (`--max-context-length 16384 --batch-size-samples 2`).
 
-## LoRA v2: IN PROGRESS (started 2026-10-16 ~21:30 UTC, user: go)
+## LoRA v2: IN PROGRESS (launched 2026-10-16 21:46 UTC, user: go)
+
+**Epoch 0 (00:07 UTC): action-only held-out eval loss 0.425 → 0.110 (−74%).** Epoch 1 running; final adapter ≈ 02:10 UTC, then gates (`GATES_OUT=~/matrix/out_gates_v2 run_gates.sh ~/train/adapter_h2`). Epoch-0 checkpoint copied to `results/harvest_20261015/adapter_h2_epoch0/`.
 
 Single change vs v1: `train_lora.py --mask-thinking` — the loss covers only the actions (tool calls, final text); `<|channel>…<channel|>` thinking blocks are excluded (supervised tokens 36% → 10%). Same data (90 train / 28 eval at a 20K cap), r=32 α=64, 2 epochs, lr 1e-4, grad-accum 8, max_memory 22 GiB/GPU. VM `gemma-train2-20261016` (Spot a2-highgpu-4g from `gemma-train-20261015-envsnap`, disk `gemma-train2-20261016-disk`); output `~/train/adapter_h2`; gates via `GATES_OUT=~/matrix/out_gates_v2 bash ~/matrix/run_gates.sh ~/train/adapter_h2` (same 38×3 paired protocol, same bar: net ≥ +9, p < 0.1). Eval loss is now on action tokens only — not comparable to v1's 0.138.
 
