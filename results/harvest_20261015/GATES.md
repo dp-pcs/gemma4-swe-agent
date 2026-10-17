@@ -1,3 +1,52 @@
+# LoRA v2 (adapter_h2, thinking masked) gate results — 2026-10-17
+
+## Verdict: not promoted (worse than v1)
+
+| Gate | Result |
+| --- | --- |
+| Training | `--mask-thinking` (loss on tool calls / final text only, 10% of tokens), same 90 train / 28 eval trajectories, r=32, 2 epochs, lr 1e-4; action-only held-out loss 0.425 → 0.110 → 0.088 |
+| G1 smoke (12 held-out tasks) | **3/12** (v1: 8/12); 7 runs timed out with 2–19 tool calls, 9 ended with an empty patch |
+| **Held-out screen (38 × 3, paired vs T1_toolfix)** | **G1_lora 19/114 (16.7%) vs T1 41/114 (36.0%); W 1 / L 23, net −22, sign-test p ≈ 0** |
+
+## What went wrong: repetition loops
+
+Outside the failures the adapter is exactly what v2 aimed for — terse and fast: median 43–56 completion
+tokens per model call vs 133 for the untrained agent, clean tool calls, and its resolved runs are short.
+But **8 of 300 model calls in G1 (2.7%) ran to the 8192-token output cap in a repetition loop** — 5 in the
+thinking channel (`Example: ... No.` repeated for 16K characters), 2 inside a tool call's arguments
+(`except Exception as e:` repeated for 31K characters). Each such call costs 160–275 s of the 480 s budget,
+and the call in flight at the timeout is not even counted, so the true loop rate is ≈ 5%. Result: 92 of
+126 adapter runs (incl. G1) ended in `timeout` (T1: 31 of 114), mean 450 s vs 408 s per task, 18.8 vs 22.1
+tool calls. Failure mix — adapter: timeout 92, empty 7, wrong 4; T1: wrong 30, timeout 31, empty 12.
+
+Mechanism: with the thinking masked out of the loss, nothing anchors *when to stop* thinking (the
+`<channel|>` token was never supervised) and 24 steps at lr 1e-4 on ≈115K action tokens (train loss
+0.04–0.07) over-sharpened the action distribution; a sharpened model at temperature 0.2 falls into loops.
+
+## Mitigation tested without retraining: `G1_lora_o2k`
+
+Same adapter, `max_output_tokens: 2048` (T1's legitimate calls: p99 1136, max 2936 tokens; the adapter's
+p99 739), so a loop costs ≤ ~45 s. Run 2026-10-17 22:02 UTC on the same 38 × 3 into `out_gates_v2`
+(pairs with the T1 runs above; the T1 runs were produced under heavier server load, which slightly
+favours this arm). Result: see `gates_analysis_o2k.json` / HANDOFF.
+
+## v3 candidates (trainer options implemented, dry-run verified, not trained)
+
+- `--max-thinking-chars 600`: truncate each `reasoning_content` before rendering so the thinking is short
+  **and supervised** (median thought is 212 chars; p90 2286; max 16268) — the rendered examples shrink, so
+  109 of 113 trajectories fit in 20K tokens (v1/v2: 90), median 12.8K tokens, 24% supervised; plus
+  `--lr 5e-5` to reduce over-sharpening.
+- `--mask-thinking --keep-thinking-markers`: v2's masking but with the `<|channel>` / `<channel|>` tokens
+  supervised (the model learns to open and close thinking).
+- Cheapest first check: gate `adapter_h2/epoch0` (12 steps, less sharpened) with the 2048 cap.
+
+Artifacts: `out_gates_v2/` on the VM (`s0/G1_lora` smoke, `s{1,2,3}/{T1_toolfix,G1_lora,G1_lora_o2k}`),
+`gates_analysis.json`, `gates_analysis_o2k.json`; adapters `../adapter_h2_final/` (fp32 PEFT) and
+`../adapter_h2_packaged/` (bf16, as served); `adapter_h2_epoch0/`. Training ≈ 6 h wall incl. two OOM
+restarts (see `scripts/rft/train_lora.py --layer-split/--offload-ckpt/--mem-probe`), gates ≈ 1.7 h.
+
+---
+
 # LoRA v1 (swe_rft_h1) gate results — 2026-10-16
 
 ## Verdict: not promoted
