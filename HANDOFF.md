@@ -146,7 +146,7 @@ distinct), 75 on the 38 held-out tasks (18 distinct). Everything is under
 
 ## LoRA v2: IN PROGRESS (launched 2026-10-16 21:46 UTC, user: go)
 
-**Epoch 0 (00:07 UTC): action-only held-out eval loss 0.425 → 0.110 (−74%).** Epoch 1 running; final adapter ≈ 02:10 UTC, then gates (`GATES_OUT=~/matrix/out_gates_v2 run_gates.sh ~/train/adapter_h2`). Epoch-0 checkpoint copied to `results/harvest_20261015/adapter_h2_epoch0/`.
+**Epoch 0 (00:07 UTC): action-only held-out eval loss 0.425 → 0.110 (−74%).** OOM on GPU 1 at step 18 (uneven 30-layer shard); resumed 00:57 UTC from `adapter_h2/epoch0` with `--max-memory-gib 15,15,15,20` (15 layers per GPU); final adapter ≈ 02:50 UTC. Epoch 1 running; final adapter ≈ 02:10 UTC, then gates (`GATES_OUT=~/matrix/out_gates_v2 run_gates.sh ~/train/adapter_h2`). Epoch-0 checkpoint copied to `results/harvest_20261015/adapter_h2_epoch0/`.
 
 Single change vs v1: `train_lora.py --mask-thinking` — the loss covers only the actions (tool calls, final text); `<|channel>…<channel|>` thinking blocks are excluded (supervised tokens 36% → 10%). Same data (90 train / 28 eval at a 20K cap), r=32 α=64, 2 epochs, lr 1e-4, grad-accum 8, max_memory 22 GiB/GPU. VM `gemma-train2-20261016` (Spot a2-highgpu-4g from `gemma-train-20261015-envsnap`, disk `gemma-train2-20261016-disk`); output `~/train/adapter_h2`; gates via `GATES_OUT=~/matrix/out_gates_v2 bash ~/matrix/run_gates.sh ~/train/adapter_h2` (same 38×3 paired protocol, same bar: net ≥ +9, p < 0.1). Eval loss is now on action tokens only — not comparable to v1's 0.138.
 
