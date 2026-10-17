@@ -25,12 +25,28 @@ from pathlib import Path
 THINK_RE = None
 
 
-def render_example(tok, ex, max_len, mask_thinking=False):
+def truncate_reasoning(msgs, max_chars, field="reasoning_content"):
+    """Copy of msgs with each assistant reasoning string cut to max_chars (at the last line break
+    in the final third when possible) so the rendered thinking blocks stay short and bounded."""
+    out = []
+    for m in msgs:
+        r = m.get(field) if m.get("role") == "assistant" else None
+        if isinstance(r, str) and len(r) > max_chars:
+            cut = r.rfind("\n", max_chars * 2 // 3, max_chars)
+            m = dict(m, **{field: r[: cut if cut > 0 else max_chars].rstrip()})
+        out.append(m)
+    return out
+
+
+def render_example(tok, ex, max_len, mask_thinking=False, max_thinking_chars=0, keep_markers=False):
     """Return (input_ids, labels) with labels on assistant turns only, or None if too long.
 
     With mask_thinking, the <|channel>...<channel|> thinking blocks inside assistant turns are
     excluded from the loss, so training teaches the actions (tool calls, final text) but not the
-    length or content of the reasoning.
+    length or content of the reasoning. keep_markers keeps the two channel marker tokens of each
+    masked block supervised (the model still learns when to open and close thinking).
+    max_thinking_chars > 0 truncates each reasoning string before rendering (bounded thinking that
+    stays supervised).
     """
     global THINK_RE
     import re
@@ -38,6 +54,8 @@ def render_example(tok, ex, max_len, mask_thinking=False):
     if THINK_RE is None:
         THINK_RE = re.compile(r"<\|channel>.*?<channel\|>", re.S)
     msgs, tools = ex["messages"], ex.get("tools")
+    if max_thinking_chars > 0:
+        msgs = truncate_reasoning(msgs, max_thinking_chars)
     full = tok.apply_chat_template(msgs, tools=tools, tokenize=False)
     enc = tok(full, add_special_tokens=False, return_offsets_mapping=True)
     ids, offs = enc["input_ids"], enc["offset_mapping"]
@@ -57,20 +75,23 @@ def render_example(tok, ex, max_len, mask_thinking=False):
 
     labels = [ids[i] if in_assistant(s) else -100 for i, (s, e) in enumerate(offs)]
     if mask_thinking:
+        open_len, close_len = len("<|channel>"), len("<channel|>")
         for mt in THINK_RE.finditer(full):
             a, b = mt.span()
             if in_assistant(a):
                 for i, (s, e) in enumerate(offs):
                     if a <= s < b:
+                        if keep_markers and (s < a + open_len or e > b - close_len):
+                            continue  # token overlaps the opening or closing marker: keep supervised
                         labels[i] = -100
     return ids, labels
 
 
-def load_examples(tok, path, max_len, mask_thinking=False):
+def load_examples(tok, path, max_len, mask_thinking=False, max_thinking_chars=0, keep_markers=False):
     rows = [json.loads(l) for l in open(path)]
     out, dropped = [], 0
     for ex in rows:
-        r = render_example(tok, ex, max_len, mask_thinking)
+        r = render_example(tok, ex, max_len, mask_thinking, max_thinking_chars, keep_markers)
         if r is None:
             dropped += 1
             continue
@@ -109,20 +130,26 @@ def main() -> None:
                     help="before training, run fwd+bwd on the longest and most-supervised examples and print per-GPU peak memory")
     ap.add_argument("--probe-only", action="store_true", help="exit after --mem-probe")
     ap.add_argument("--probe-max-gib", type=float, default=38.0, help="with --mem-probe: exit 3 (PROBE_FAIL) if any GPU peak exceeds this")
+    ap.add_argument("--max-thinking-chars", type=int, default=0,
+                    help="truncate each assistant reasoning_content to this many characters before rendering (bounded, supervised thinking)")
+    ap.add_argument("--keep-thinking-markers", action="store_true",
+                    help="with --mask-thinking: keep the <|channel> / <channel|> marker tokens in the loss")
     args = ap.parse_args()
 
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    train, dropped = load_examples(tok, args.train, args.max_len, args.mask_thinking)
+    render_opts = dict(mask_thinking=args.mask_thinking, max_thinking_chars=args.max_thinking_chars,
+                       keep_markers=args.keep_thinking_markers)
+    train, dropped = load_examples(tok, args.train, args.max_len, **render_opts)
     lens = sorted(len(i) for i, _ in train)
     sup = [sum(1 for x in l if x != -100) for _, l in train]
     print(f"train: {len(train)} examples ({dropped} dropped > {args.max_len} tokens); tokens min {lens[0]} "
           f"median {lens[len(lens)//2]} max {lens[-1]}; supervised tokens/example median {sorted(sup)[len(sup)//2]} "
-          f"({100*sum(sup)/sum(lens):.0f}% of tokens); mask_thinking={args.mask_thinking}")
+          f"({100*sum(sup)/sum(lens):.0f}% of tokens); {render_opts}")
     evals = []
     if args.eval:
-        evals, edrop = load_examples(tok, args.eval, args.max_len, args.mask_thinking)
+        evals, edrop = load_examples(tok, args.eval, args.max_len, **render_opts)
         print(f"eval: {len(evals)} examples ({edrop} dropped)")
     if args.dry_run:
         ids, labels = train[0]
