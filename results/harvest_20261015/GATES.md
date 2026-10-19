@@ -27,9 +27,10 @@ timeouts come from. Discordant tasks: v3-only wins on `fastapi_14419` ×2, `fast
 
 ## Follow-ups
 
-- `G1_lora_o4k` (same adapter, `max_output_tokens: 4096`, loops cost ≤ ~90 s): launched 2026-10-19 23:12 UTC
-  on the same 38 × 3 into `out_gates_v3` (pairs with the T1 runs above). Result: see HANDOFF /
-  `gates_analysis_o4k.json`.
+- `G1_lora_o4k` (same adapter, `max_output_tokens: 4096`, loops cost ≤ ~90 s): run 2026-10-19 23:12–23:54 UTC
+  on the same 38 × 3 into `out_gates_v3` (pairs with the T1 runs above). **Result: 30/114 (26.3%) vs T1 35/114;
+  W 4 / L 9, net −5, p = 0.27** — timeouts fell (42 vs 53) but empty patches rose (20 vs 15); the cap does not
+  change the verdict. v3 ≈ T1 − 4 with or without the cap: the residual loops were not the whole gap.
 - Candidate zip built, not uploaded unless the user says so: `submission_build/lora_h3_20261019/`
   (zip sha `488652b4…`, pinned-SDK compile check ok). Rationale for uploading a neutral adapter: it validates
   the real-adapter path through the scorer (490 MB bf16 LoRA, `adapter: swe_rft_h1`, `openai/swe_rft_h1`).
