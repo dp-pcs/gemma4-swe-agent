@@ -1,3 +1,46 @@
+# LoRA v3 (adapter_h3, bounded supervised thinking) gate results — 2026-10-19
+
+## Verdict: neutral — "roughly equal" zone (user decides); first adapter that does not degrade the agent
+
+| Gate | Result |
+| --- | --- |
+| Training | `--max-thinking-chars 600` (thinking kept and supervised, cut at 600 chars), `--lr 5e-5`, 2 epochs, r=32, 109 train / 35 eval trajectories (shorter examples → 109 fit vs 90); held-out loss 1.105 → 0.325 → 0.249; one Spot preemption auto-resumed |
+| G1 smoke (12 held-out tasks) | **7/12** (v1 8, v2 3); 4 timeouts, 1 empty |
+| **Held-out screen (38 × 3, paired vs T1_toolfix)** | **v3 31/114 (27.2%) vs T1 35/114 (30.7%); W 9 / L 13, net −4, sign-test p = 0.52** — per sample T1 12/10/13, v3 10/10/11 of 38; both resolved 22 |
+
+## Mechanics: both earlier failure modes fixed, a residue of loops remains
+
+| | T1_toolfix | v3 adapter |
+| --- | ---: | ---: |
+| completion tokens per call, median / p90 / p99 | 124 / 758 / 3340 | **109 / 623** / 4113 |
+| seconds between agent steps, median | 5.5 | **4.9** |
+| calls at the 8192-token cap (loops) | 0 of 2698 | **13 of 2776 (0.5%)** (v2: 2.7%) |
+| mean tool calls per run | 21.8 | 22.9 |
+| mean wall per run | 392 s | 409 s |
+| failures: timeout / wrong / empty | 38 / 25 / 16 | **53** / 20 / 15 |
+
+The adapter is terser and faster per step than the untrained agent (v1's verbosity is gone) and loops only
+0.5% of the time (v2's 2.7% is gone), but each remaining loop still costs ~3 min, which is where the extra 15
+timeouts come from. Discordant tasks: v3-only wins on `fastapi_14419` ×2, `fastapi_14873` ×2,
+`fastapi_15589` ×2, `fastapi_14616`, `fastapi_9425`, `fastapi_9753`; T1-only wins on `fastapi_14458` ×3,
+`fastapi_14360` ×2, `fastapi_5624` ×2 and five singles.
+
+## Follow-ups
+
+- `G1_lora_o4k` (same adapter, `max_output_tokens: 4096`, loops cost ≤ ~90 s): launched 2026-10-19 23:12 UTC
+  on the same 38 × 3 into `out_gates_v3` (pairs with the T1 runs above). Result: see HANDOFF /
+  `gates_analysis_o4k.json`.
+- Candidate zip built, not uploaded unless the user says so: `submission_build/lora_h3_20261019/`
+  (zip sha `488652b4…`, pinned-SDK compile check ok). Rationale for uploading a neutral adapter: it validates
+  the real-adapter path through the scorer (490 MB bf16 LoRA, `adapter: swe_rft_h1`, `openai/swe_rft_h1`).
+- Plan step 2 (if the line continues): harvest ≈ 12 samples/task on the 57 training tasks with a 6-min budget,
+  keep the fastest successes, retrain with this recipe.
+
+Artifacts: `../gates_v3/` (out_gates_v3 runs, traces, patches, logs, analyses), `../adapter_h3_final/`
+(fp32), `../adapter_h3_packaged/` (bf16 as served, sha `cf2904b4…`), `adapter_h3_epoch0` on the VM disk.
+
+---
+
 # LoRA v2 (adapter_h2, thinking masked) gate results — 2026-10-17
 
 ## Verdict: not promoted (worse than v1)
