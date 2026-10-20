@@ -146,7 +146,7 @@ distinct), 75 on the 38 held-out tasks (18 distinct). Everything is under
 
 ## LoRA v4: TRAINED 07:47 UTC 2026-10-20, GATE RUNNING
 
-Held-out eval loss 1.105 → 0.321 (epoch 0) → **0.256** (epoch 1) — within noise of v3 (0.325 → 0.249) despite the different data; train loss 1.04 → 0.22; no preemption; peaks ≤ 34.5 GiB. Adapter `~/train/adapter_h4` (+ `epoch0/`, `epoch1/`), fp32 copy → `results/harvest2_20261019/adapter_h4_final/`. The gate waiter launches `GATES_OUT=~/matrix/out_gates_v4 run_gates.sh ~/train/adapter_h4` on the save (G1 12 tasks, then 38 × 3 paired vs T1) → verdict ≈ 09:45 UTC; same bar. Note: the token-level loss is now clearly saturated across v3/v4 at ≈ 0.25 and tells us nothing about task gains — only the gate does.
+Held-out eval loss 1.105 → 0.321 (epoch 0) → **0.256** (epoch 1) — within noise of v3 (0.325 → 0.249) despite the different data; train loss 1.04 → 0.22; no preemption; peaks ≤ 34.5 GiB. Adapter `~/train/adapter_h4` (+ `epoch0/`, `epoch1/`), fp32 copy → `results/harvest2_20261019/adapter_h4_final/`. The gate waiter launches `GATES_OUT=~/matrix/out_gates_v4 run_gates.sh ~/train/adapter_h4` on the save (G1 12 tasks, then 38 × 3 paired vs T1) → verdict ≈ 09:45 UTC; same bar. Note: the token-level loss is now clearly saturated across v3/v4 at ≈ 0.25 and tells us nothing about task gains — only the gate does. **Candidate built, NOT uploaded: `submission_build/lora_h4_20261020/submission.zip`** (T1 tree + bf16 `adapter_h4_packaged` as `swe_rft_h1`, sha `eccf2bc1…`, adapter sha `c98fefb2…` = the bytes served in the gate; pinned-SDK compile ok on the VM) — upload only if the gate passes and the user agrees.
 
 ### Harvest 2 and the v4 data (03:10 UTC)
 
