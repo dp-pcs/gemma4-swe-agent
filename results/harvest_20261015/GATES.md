@@ -1,3 +1,34 @@
+# LoRA v4 (adapter_h4, efficient-harvest data) gate results — 2026-10-20
+
+## Verdict: neutral again (net −1) — the LoRA SFT line is closed for now
+
+| Gate | Result |
+| --- | --- |
+| Data | harvest 2 (57 training tasks × 12 samples, T1 prompt @ temp 0.7, **6-min budget**): 684 runs, 267 resolved (39%), only 33 tasks ever solved; v4 set = fewest-tool-call successes from both harvests, ≤ 24 calls, 5 per task → **121 examples / 28 tasks** (median 16 calls vs 17 in v3's data) — `results/harvest2_20261019/` |
+| Training | v3 recipe (`--max-thinking-chars 600 --lr 5e-5`, 2 epochs, r=32); held-out loss 1.105 → 0.321 → 0.256 (v3: 0.249 — the token metric is saturated and uninformative) |
+| G1 smoke (12 held-out tasks) | **7/12** (v3 7, v1 8, v2 3); 4 timeouts, 1 wrong; median reply 112 tokens, 1 of 287 calls at the cap |
+| **Held-out screen (38 × 3, paired vs T1_toolfix)** | **v4 32/114 (28.1%) vs T1 33/114 (28.9%); W 5 / L 6, net −1, p = 1.0** (incl. G1: 39/126) |
+
+Mechanics: v4 runs longer than T1 (mean 417 s vs 398 s) with slightly fewer tool calls (21.1 vs 22.6);
+failures v4: timeout 62 of 126, wrong 16, empty 9 — T1: wrong 26, timeout 36, empty 19. The efficient data
+did not make the agent faster per task; it trades wrong patches for timeouts.
+
+**Why the line is closed:** v3 and v4 are the best self-distillation can do with this harness — a 31B model
+fine-tuned on 100–150 of its own successful trajectories reproduces its own behaviour (neutral), and the
+adapter costs scorer time: Kaggle ref 57412209 (v3) failed with *"exceeded the allowed runtime"* under the
+12-hour / ~120-sequential-task ceiling that T1 passes. An adapter would have to be *faster* than T1 per task
+to be submittable at all; none of ours is.
+
+**Follow-up running (14:05 UTC):** `run_6m.sh` — `T1_6m` and `G1_lora_6m` (`max_time_minutes: 6`) on the same
+38 × 3 into `out_gates_v4`, paired against the fresh T1 @ 8 min runs: tells (a) what a scorer-safe 6-min
+budget costs T1, (b) whether v4 — whose data was selected at 6 min — beats T1 under that budget.
+
+Artifacts: `results/harvest2_20261019/gates_v4/` (runs, traces, analysis), `adapter_h4_final/` (fp32),
+`adapter_h4_packaged/` (bf16 as served, sha `c98fefb2…`), candidate `submission_build/lora_h4_20261020/`
+(zip sha `eccf2bc1…`, not uploaded).
+
+---
+
 # LoRA v3 (adapter_h3, bounded supervised thinking) gate results — 2026-10-19
 
 ## Verdict: neutral — "roughly equal" zone (user decides); first adapter that does not degrade the agent
