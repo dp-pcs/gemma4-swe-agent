@@ -31,9 +31,12 @@ timeouts come from. Discordant tasks: v3-only wins on `fastapi_14419` ×2, `fast
   on the same 38 × 3 into `out_gates_v3` (pairs with the T1 runs above). **Result: 30/114 (26.3%) vs T1 35/114;
   W 4 / L 9, net −5, p = 0.27** — timeouts fell (42 vs 53) but empty patches rose (20 vs 15); the cap does not
   change the verdict. v3 ≈ T1 − 4 with or without the cap: the residual loops were not the whole gap.
-- Candidate zip built, not uploaded unless the user says so: `submission_build/lora_h3_20261019/`
-  (zip sha `488652b4…`, pinned-SDK compile check ok). Rationale for uploading a neutral adapter: it validates
-  the real-adapter path through the scorer (490 MB bf16 LoRA, `adapter: swe_rft_h1`, `openai/swe_rft_h1`).
+- Candidate zip `submission_build/lora_h3_20261019/` (sha `488652b4…`) **uploaded 2026-10-19 23:18 UTC as Kaggle
+  ref 57412209 to validate the real-adapter path → FAILED: "Your submission notebook exceeded the allowed
+  runtime"** (COMPLETE, no score). The scorer runs ~120 hidden tasks sequentially under a 12-hour ceiling
+  (agent-loop time only), i.e. ≲ 6 min per task on average; the adapter's longer runs plus vLLM LoRA overhead
+  on 4× L4 pushed it over, while T1 (no adapter) at the same 8-min budget passed. Every adapter submission
+  from here needs a 6-min (or shorter) `max_time_minutes` and must be at least as fast as T1 per task.
 - Plan step 2 (if the line continues): harvest ≈ 12 samples/task on the 57 training tasks with a 6-min budget,
   keep the fastest successes, retrain with this recipe.
 
