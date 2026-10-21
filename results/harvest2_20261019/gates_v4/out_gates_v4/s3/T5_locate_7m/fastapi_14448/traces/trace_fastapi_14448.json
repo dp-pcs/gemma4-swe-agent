@@ -1,0 +1,597 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "agent": {
+    "name": "adk-eval-core",
+    "version": "1.0"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "system",
+      "message": "You are an autonomous software engineer. Your job: make the smallest correct change to the SOURCE code in /workspace so that the hidden tests for the issue below pass. The hidden tests were written from the issue text, so the exact names, messages, types and behaviours in the issue are the specification.\n\n# HARD LIMITS\n- 28 tool calls and 7 minutes in total. When either runs out, the working tree is graded as it is. An edit that exists counts, even if you never call `submit_patch`. An unedited tree always scores zero.\n- Never create, modify or delete test files (`test_*.py`, `*_test.py`, anything under `tests/`, `pytest.ini`, `conftest.py`). This is an automatic failure.\n- Scratch files go in /tmp only. Any file left under /workspace becomes part of the graded patch.\n- Never run a full test suite (bare `pytest`, `pytest .`, `unittest discover`). Always name one test file, and add `-k` when you can.\n- Never look outside /workspace. All dependencies are already installed.\n- Only five tools exist: `run_command`, `read_file`, `edit_file`, `get_status` and `submit_patch`. There is no `write_file` and there are no code-graph tools; ignore any mention of them. Create files only through `run_command` with a quoted heredoc, and only under /tmp unless the issue requires a new source module.\n\n# CALL PLAN\n- Call 1: reproduce (step 1b) \u2014 run the issue's snippet with `python -c`, or run the single test the issue names. Keep the exact command; you will run it again after editing.\n- Call 2: shortlist the candidate files with the one-command locator in step 2a (it ranks files by recent change history and by how many of the issue's identifiers they contain; the right file is in its top 5 about 9 times in 10). Calls 3-5: read the hot regions of the top 2-3 files. Calls 6-8: edit. You MUST have edited a source file by call 8. If you are unsure, make your best-guess edit in the most likely place now. A wrong edit can still be corrected. Pure reading cannot score.\n- After call 5, call `get_status` once (it is free and does not count) and plan the remaining calls from the numbers it returns.\n- TRIAGE at that checkpoint: if you have NOT yet identified the file and function to change, this task is in the hard bucket. Do not keep exploring. Make your best-guess edit in the most likely place with your next call, run one verification, and submit by call 11 \u2014 no later than 4 minutes in. Time spent past that point on an unlocated bug almost never pays; a quick plausible edit sometimes does.\n- Calls 9-11: VERIFY (step 4) \u2014 this is mandatory, not optional: re-run the reproduction command and the nearest test file. An edit you never re-checked is a coin flip; checked edits pass twice as often.\n- Calls 12-16: correct and re-verify once. If verification fails a SECOND time, stop iterating: keep whichever edit is closest to the issue's wording, remove nothing else, and submit. Call 16 onward: no new exploration. Check, fix, submit.\n- Always finish with `git diff` followed by `submit_patch`. Never call `submit_patch` before step 4 has run after your last edit, unless `get_status` shows under 60 seconds left.\n\n# PROCEDURE\n\n## 1. Extract the specification (no tool call)\nFrom the issue, list for yourself: the exact file, function, class or CLI name; the exact error message and exception type; the expected return value or output; the inputs that trigger the bug; every edge case mentioned (None, empty, negative, unicode, duplicates, defaults). Treat every concrete string and name in the issue as a literal that must appear exactly in your code.\n\n## 1b. Reproduce first (1 call)\n- If the issue contains a code snippet, run it now, once, exactly as given, with `python3 -c '...'` (or a quoted heredoc to /tmp/repro.py and `python3 /tmp/repro.py`). Add one `print` of the value or exception the issue says is wrong. This is call 1.\n- If there is no snippet but the issue names a test or a CLI command, run that single test (`python -m pytest tests/<file> -x -q -k <name> 2>&1 | tail -25`) or command instead.\n- Record the exact command and the exact wrong output or traceback line. The traceback tells you the file and function to edit; the wrong output tells you what \"fixed\" looks like. You will run this same command again in step 4.\n- Do not spend more than one call here. If nothing can be reproduced, move on; verification will then rely on the nearest test file.\n\n## 2a. Shortlist the files (1 call \u2014 call 2)\n- Pick 3 to 6 identifiers from the issue: function, class, parameter and option names, exact error-message words, the module name if given. Plain words only (no quotes or regex inside them). Then run this exact command once, substituting your identifiers for `IDENT1 IDENT2 IDENT3`:\n```\n{ git log -n 50 --name-only --pretty=format: | grep -E '\\.py$' | sort | uniq -c | awk '{c=$1; if (c>5) c=5; print c, $2}'; for i in IDENT1 IDENT2 IDENT3; do git grep -l -F -e \"$i\" -- '*.py' | awk -v n=\"$(git grep -l -F -e \"$i\" -- '*.py' | wc -l)\" 'n>0 && n<=40 {print 3, $1}'; done; } | grep -vE '(^|/)tests?/|(^|/)test_[^/]*\\.py$|_test\\.py$|conftest\\.py$' | awk '{s[$2]+=$1} END {for (f in s) print s[f], f}' | sort -rn | head -10\n```\n- It prints `score path`, best first. The file to edit is almost always in the top 5. If the issue names a path explicitly, that path wins regardless of the list; if the step-1b traceback names a file in the repository, that file wins too.\n- Next (calls 3-5): for the top 2-3 files, find the hot lines and read around them in one command per file: `grep -n -F -e IDENT1 -e IDENT2 path.py | head -20` followed by `sed -n 'START,ENDp' path.py` for the 40-80 lines around the best hit. Do not open files that are not on the shortlist unless the shortlist is clearly wrong (nothing on it mentions the issue's subject).\n\n## 2. Locate\n- Use exact paths from the issue directly. When further searches are necessary, combine independent searches for the issue's exact symbols, their callers and relevant test paths into one run_command. Use git grep with fixed-string patterns for literal identifiers and git ls-files for tracked file paths; each result should show its file path and line number where applicable.\n- Keep every tool result small: pipe searches through `| head -40`, read at most 80 lines at a time, and run tests with `-x -q 2>&1 | tail -25`. Large outputs waste the context window and the clock.\n- Batch only searches whose inputs are already known. If the next search depends on the first result, inspect that result before searching again. Limit each search to about 20 matching lines and keep total output short; never dump whole files or the repository tree.\n- Once the target is located, read the relevant implementation plus one relevant caller or test case. When both paths and line ranges are known, read these small regions in one run_command using sed with explicit line ranges, or use read_file for a single region. Aim for about 40 lines per region and at most three regions per command. Include enough surrounding code to understand signatures, defaults and error handling.\n- For a bug: find where the wrong behaviour is produced and use the caller or test to understand the contract before editing.\n- For a feature: find the closest existing sibling (a similar function, option, class, or doc example) and copy its pattern, including registration points such as __all__, option lists, dispatch tables and imports.\n- Reuse paths and test names already discovered. Do not spend another tool call repeating a search that already answered the question.\n- You already ran the reproduction in step 1b; use its traceback to pick the file and function. Do not run the snippet again until step 4.\n\n## 3. Edit\n- Pick the edit tool by the text you are replacing. Use `edit_file` only when `old_string` is at most 3 lines, contains no colon (`:`), and is unique in the file; copy it exactly, including whitespace. In every other case (a `def`, `class`, `if`, `for`, `with` or `try` line, a dict literal, slice, annotation or f-string, or anything longer than 3 lines) do not call `edit_file`. Use one `run_command` with an inline Python script in a quoted heredoc that asserts the old text occurs exactly once, replaces it, and writes the file back:\n```\npython3 - <<'PY'\nfrom pathlib import Path\np = Path('pkg/module.py'); s = p.read_text()\nold = '''    if value is None:\n        return default\n'''\nnew = '''    if value is None or value == \"\":\n        return default\n'''\nassert s.count(old) == 1, s.count(old)\np.write_text(s.replace(old, new))\nPY\n```\n- If `edit_file` reports a missing or malformed `old_string`, no match, or multiple matches, do not retry it; switch to the heredoc script at once. Never repeat an identical failed edit, and never rewrite a file from memory. For a genuinely new source file that the issue requires, write it with `cat > path <<'EOF'` through `run_command`.\n- Fix the cause, not the symptom. Do not special-case the example from the issue.\n- Change only what the issue requires. Keep existing signatures, defaults, and backward compatibility unless the issue says otherwise. Match the style, naming and error-handling idioms of the surrounding code.\n- If the same behaviour has parallel implementations (sync and async variants, Client and AsyncClient, several backends or transports, typing overloads, re-exports in `__init__.py` or `__all__`), apply the change to every one of them. Hidden tests often exercise more than one.\n- Use the exact exception class and exact message text from the issue. If the issue only describes the error, reuse the wording style of neighbouring error messages.\n- Handle every edge case you listed in step 1.\n- For documentation-code tasks (for example FastAPI), edit the executable code under `docs_src/`.\n\n## 4. Verify (MANDATORY after your last edit, 2 calls)\n- First re-run the exact reproduction command from step 1b. The wrong output or traceback must be gone and the behaviour the issue asks for must be visible. If it is not, your edit is wrong: fix the source (step 3) and re-run.\n- Then find the nearest test file with `find tests -name \"*keyword*.py\"` and run `timeout 150 python -m pytest tests/path/test_x.py -x -q -k keyword 2>&1 | tail -25` (`python3 -m unittest tests.test_x` for unittest projects). Both checks together are two calls; do them in one `run_command` when both commands are already known.\n- Failures that come from missing fixtures, missing data, or import errors unrelated to your change are pre-existing. Ignore them. Never repair tests or the environment.\n- If a test related to your change fails, read the traceback, fix the source once, and rerun once. If no test can run, do one `python -c` check or `python -m py_compile` on the edited file.\n\n## 5. Final check and submit\n- Only after step 4 has run on your final edit (or `get_status` shows under 60 seconds left): run `git status --short && git diff` in one call. `git diff` alone hides untracked files, but `submit_patch` includes them. If you see an untracked scratch file or a changed test file, remove it or restore it with `git checkout --` before submitting. Confirm that: only source files changed; every name, message and type from step 1 appears exactly; nothing unrelated was touched; there are no leftover debug prints or stray files.\n- Call `submit_patch`. Confirm `patch_size > 0` and `files_changed > 0`. If either is 0, you have not edited anything. Edit now and submit again.\n- End with a single-sentence summary of the fix.\n\n# DECISION RULES\n- Ambiguous issue: choose the most literal reading of the issue text and act on it. Do not ask questions and do not stall.\n- Several possible locations: pick the one where the wrong behaviour is produced, not where it is merely observed.\n- Search returned nothing: try one different specific string, then edit your best candidate anyway.\n- Stuck after a failed fix: make a different, smaller change. Do not repeat the same edit. After the second failed verification, submit what you have.\n- Still unlocated at the call-5 checkpoint: best-guess edit, one verification, submit by call 11. Finishing a hopeless task early is correct behaviour, not a failure.\n- Never conclude that nothing needs to change. Every task requires a non-empty source patch.",
+      "extra": {
+        "event_type": "system_instruction",
+        "elapsed_s": 12.557317018508911,
+        "timestamp": 1792563333.6415603,
+        "author": "harness"
+      }
+    },
+    {
+      "step_id": 2,
+      "source": "user",
+      "message": "You are evaluating a software engineering task for repository fastapi/fastapi.\n\nProblem Statement:\n\ud83d\udc1b Fix support for functools wraps and partial combined, for async and regular functions and classes in path operations and dependencies\n\n\ud83d\udc1b Fix support for functools wraps and partial combined, for async and regular functions and classes in path operations and dependencies\r\n\r\nThis also uses and extends the tests created by @YuriiMotov :raised_hands: \r\n\r\nShould fix / related to: https://github.com/fastapi/fastapi/issues/14444\r\n\r\nThe new tests simulate the multiple combinations of how decorators could affect dependencies and path operation functions (endpoints).\r\n\r\nThe logic to analyze if a function is an async, generator, async generator,  callable instance, etc. now also checks and unwraps and extracts partials in all those levels.\r\n\r\nThe main case is when the callable is an _async_ something (function, generator, etc) because then it needs to be awaited.\r\n\r\nBut the original function could be async or not, the wrapper could be async or not. if either is async, then it has to be awaited, no matter if the other is not async. So, analyzing only the last point in the chain is not enough, it's necessary to analyze the function but also the wrapper.\r\n\r\nThis PR implements and tests all that, all those combinations.\n\n## Task Budget (Session terminates when any budget is exhausted)\n- Time allowance: 7.0 minutes\n- Tool calls allowance: 28 calls\n- Max loop iterations: 80 turns\n\n## Execution Environment Rules\n- Single command timeout: 240 seconds (commands exceeding this fail without ending the session)\n- Command output limit: 5000 characters\n- File view limit: 150 lines per read_file call\n- File character limit: 10000 characters per read_file call\n- Environment is offline (no network/PyPI access). All repository and test dependencies are ALREADY pre-installed. Do NOT attempt to run pip install or download packages.\n\n## Instructions:\n0. All source code is under `/workspace`. Do NOT search outside `/workspace` (e.g. `/usr/`, `/wheels/`, system site-packages). If imports fail, the issue is in the source code under `/workspace`, not in missing system packages.\n1. Analyze the problem statement and any provided hints carefully to identify all requested script paths, CLI subcommands, or Python modules.\n2. Inspect existing codebase conventions and test files before making edits.\n3. Verify your implementation using targeted tests or inline assertions before submitting.\n4. Call submit_patch only after your implementation is complete and verified.\n5. As your final action, you must return a text-only response reporting your completion to terminate the session.\n## Workspace Layout\nThe repository is located at `/workspace`. Here is the directory tree (up to 3 levels):\n```\n./CITATION.cff\n./CONTRIBUTING.md\n./LICENSE\n./README.md\n./SECURITY.md\n./conftest.py\n./docs\n./docs_src\n./fastapi\n./fastapi/__init__.py\n./fastapi/__main__.py\n./fastapi/_compat\n./fastapi/_compat/__init__.py\n./fastapi/_compat/main.py\n./fastapi/_compat/may_v1.py\n./fastapi/_compat/model_field.py\n./fastapi/_compat/shared.py\n./fastapi/_compat/v1.py\n./fastapi/_compat/v2.py\n./fastapi/applications.py\n./fastapi/background.py\n./fastapi/cli.py\n./fastapi/concurrency.py\n./fastapi/datastructures.py\n./fastapi/dependencies\n./fastapi/dependencies/__init__.py\n./fastapi/dependencies/models.py\n./fastapi/dependencies/utils.py\n./fastapi/encoders.py\n./fastapi/exception_handlers.py\n./fastapi/exceptions.py\n./fastapi/logger.py\n./fastapi/middleware\n./fastapi/middleware/__init__.py\n./fastapi/middleware/asyncexitstack.py\n./fastapi/middleware/cors.py\n./fastapi/middleware/gzip.py\n./fastapi/middleware/httpsredirect.py\n./fastapi/middleware/trustedhost.py\n./fastapi/middleware/wsgi.py\n./fastapi/openapi\n./fastapi/openapi/__init__.py\n./fastapi/openapi/constants.py\n./fastapi/openapi/docs.py\n./fastapi/openapi/models.py\n./fastapi/openapi/utils.py\n./fastapi/param_functions.py\n./fastapi/params.py\n./fastapi/py.typed\n./fastapi/requests.py\n./fastapi/responses.py\n./fastapi/routing.py\n./fastapi/security\n./fastapi/security/__init__.py\n./fastapi/security/api_key.py\n./fastapi/security/base.py\n./fastapi/security/http.py\n./fastapi/security/oauth2.py\n./fastapi/security/open_id_connect_url.py\n./fastapi/security/utils.py\n./fastapi/staticfiles.py\n./fastapi/temp_pydantic_v1_params.py\n./fastapi/templating.py\n./fastapi/testclient.py\n./fastapi/types.py\n./fastapi/utils.py\n./fastapi/websockets.py\n./pdm_build.py\n./pyproject.toml\n./pytest.ini\n./requirements-docs-tests.txt\n./requirements-docs.txt\n./requirements-github-actions.txt\n./requirements-tests.txt\n./requirements-translations.txt\n./requirements.txt\n./scripts\n./scripts/contributors.py\n./scripts/coverage.sh\n./scripts/deploy_docs_status.py\n./scripts/docs.py\n./scripts/format.sh\n./scripts/label_approved.py\n./scripts/lint.sh\n./scripts/mkdocs_hooks.py\n./scripts/notify_translations.py\n./scripts/people.py\n./scripts/playwright\n./scripts/playwright/cookie_param_models\n./scripts/playwright/header_param_models\n./scripts/playwright/query_param_models\n./scripts/playwright/request_form_models\n./scripts/playwright/separate_openapi_schemas\n./scripts/playwright/sql_databases\n./scripts/sponsors.py\n./scripts/test-cov-html.sh\n./scripts/test.sh\n./scripts/topic_repos.py\n./scripts/translate.py\n./tests\n```\n",
+      "extra": {
+        "event_type": "task_prompt",
+        "elapsed_s": 12.557326555252075,
+        "timestamp": 1792563333.6415699,
+        "author": "harness"
+      }
+    },
+    {
+      "step_id": 3,
+      "source": "agent",
+      "message": "The user wants to fix support for `functools.wraps` and `functools.partial` combined for async and regular functions and classes in path operations and dependencies in FastAPI.\n\nThe issue description mentions that the logic to analyze if a function is async, generator, async generator, callable instance, etc., needs to be improved to handle unwrapping and extracting partials. Specifically, if either the wrapper or the original function is async, it should be treated as async (and thus awaited).\n\nI need to find where FastAPI analyzes if a callable is async. This is likely in `fastapi/utils.py` or `fastapi/dependencies/utils.py`.\n\nLet's start by trying to reproduce the issue. Since no code snippet was provided, I'll have to create one based on the description.\n\nThe description says: \"if either is async, then it has to be awaited, no matter if the other is not async.\"\n\nExample scenario:\n1. A regular function wrapped by an async wrapper.\n2. An async function wrapped by a regular wrapper.\n3. A partial of an async function.\n4. A partial of a regular function wrapped by an async wrapper.\n5. etc.\n\nLet's create a reproduction script.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_3",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "cat > /tmp/repro.py <<'EOF'\nimport asyncio\nimport functools\nfrom fastapi import FastAPI, Depends\nfrom fastapi.testclient import TestClient\n\napp = FastAPI()\n\n# 1. Regular function wrapped by async wrapper\ndef reg_func():\n    return \"reg\"\n\ndef async_wrapper(func):\n    @functools.wraps(func)\n    async def wrapper(*args, **kwargs):\n        return await func(*args, **kwargs) if asyncio.iscoroutinefunction(func) else func(*args, **kwargs)\n    return wrapper\n\nwrapped_reg = async_wrapper(reg_func)\n\n# 2. Async function wrapped by regular wrapper\nasync def async_func():\n    return \"async\"\n\ndef reg_wrapper(func):\n    @functools.wraps(func)\n    def wrapper(*args, **kwargs):\n        # This is tricky because if func is async, we can't just call it.\n        # But the issue says \"if either is async, then it has to be awaited\"\n        # This implies FastAPI should detect it's async and await it.\n        return func(*args, **kwargs)\n    return wrapper\n\nwrapped_async = reg_wrapper(async_func)\n\n# 3. Partial of async function\npartial_async = functools.partial(async_func)\n\n# 4. Partial of regular function wrapped by async wrapper\npartial_reg = functools.partial(reg_func)\nwrapped_partial_reg = async_wrapper(partial_reg)\n\n@app.get(\"/reg_wrapped\")\nasync def reg_wrapped():\n    return await wrapped_reg()\n\n@app.get(\"/async_wrapped\")\nasync def async_wrapped():\n    # If FastAPI thinks this is sync, it will call it. \n    # If it's async, it will await it.\n    # But here we are calling it manually. \n    # The issue is about how FastAPI handles dependencies and path operations.\n    return await wrapped_async()\n\n@app.get(\"/partial_async\")\nasync def partial_async_endpoint():\n    return await partial_async()\n\n# Let's use them as dependencies\nasync def dep_reg_wrapped():\n    return await wrapped_reg()\n\nasync def dep_async_wrapped():\n    return await wrapped_async()\n\nasync def dep_partial_async():\n    return await partial_async()\n\n@app.get(\"/dep_reg_wrapped\")\nasync def test_dep_reg_wrapped(val = Depends(wrapped_reg)):\n    return {\"val\": val}\n\n@app.get(\"/dep_async_wrapped\")\nasync def test_dep_async_wrapped(val = Depends(wrapped_async)):\n    return {\"val\": val}\n\n@app.get(\"/dep_partial_async\")\nasync def test_dep_partial_async(val = Depends(partial_async)):\n    return {\"val\": val}\n\nclient = TestClient(app)\n\ndef test_repro():\n    print(\"Testing dep_reg_wrapped...\")\n    try:\n        resp = client.get(\"/dep_reg_wrapped\")\n        print(f\"Response: {resp.json()}\")\n        assert resp.status_code == 200\n    except Exception as e:\n        print(f\"Error: {e}\")\n\n    print(\"\\nTesting dep_async_wrapped...\")\n    try:\n        resp = client.get(\"/dep_async_wrapped\")\n        print(f\"Response: {resp.json()}\")\n        assert resp.status_code == 200\n    except Exception as e:\n        print(f\"Error: {e}\")\n\n    print(\"\\nTesting dep_partial_async...\")\n    try:\n        resp = client.get(\"/dep_partial_async\")\n        print(f\"Response: {resp.json()}\")\n        assert resp.status_code == 200\n    except Exception as e:\n        print(f\"Error: {e}\")\n\nif __name__ == \"__main__\":\n    test_repro()\nEOF\npython3 /tmp/repro.py\n"
+          },
+          "extra": {
+            "elapsed_s": 48.8494758605957,
+            "timestamp": 1792563369.9337192,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"Testing dep_reg_wrapped...\\nError: [TypeError(\\\"'coroutine' object is not iterable\\\"), TypeError('vars() argument must have __dict__ attribute')]\\n\\nTesting dep_async_wrapped...\\nResponse: {'val': 'async'}\\n\\nTesting dep_partial_async...\\nResponse: {'val': 'async'}\\n\", \"stderr\": \"<sys>:0: RuntimeWarning: coroutine 'reg_func' was never awaited\\nRuntimeWarning: Enable tracemalloc to get the object allocation traceback\\n\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 49.6771354675293,
+          "timestamp": 1792563370.7613788,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 5284,
+        "completion_tokens": 1197,
+        "cached_tokens": 0,
+        "total_tokens": 6481
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 48.8494758605957,
+        "timestamp": 1792563369.9337192,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 4,
+      "source": "agent",
+      "message": "Wait, `dep_reg_wrapped` failed.\n`Error: [TypeError(\"'coroutine' object is not iterable\"), TypeError('vars() argument must have __dict__ attribute')]`\n\nWait, `wrapped_reg` is an async function (because `async_wrapper` returns an `async def wrapper`).\nFastAPI should detect it as async and await it.\n\nLet's look at the error: `TypeError(\"'coroutine' object is not iterable\")`. This often happens when FastAPI thinks a dependency is a generator but it's actually a coroutine, or vice versa.\n\nWait, `wrapped_reg` is:\n```python\ndef async_wrapper(func):\n    @functools.wraps(func)\n    async def wrapper(*args, **kwargs):\n        return await func(*args, **kwargs) if asyncio.iscoroutinefunction(func) else func(*args, **kwargs)\n    return wrapper\n```\n`reg_func` is a regular function. `wrapped_reg` is an async function.\n\nIf FastAPI calls `wrapped_reg()`, it gets a coroutine. If it doesn't await it, it might try to iterate over it if it thinks it's a generator.\n\nWait, `dep_async_wrapped` worked.\n`wrapped_async` is:\n```python\ndef reg_wrapper(func):\n    @functools.wraps(func)\n    def wrapper(*args, **kwargs):\n        return func(*args, **kwargs)\n    return wrapper\n```\n`async_func` is async. `wrapped_async` is a regular function that returns a coroutine.\n\nIf FastAPI calls `wrapped_async()`, it gets a coroutine. If FastAPI doesn't await it (because it thinks it's a regular function), it will return the coroutine object to the endpoint.\n\nIn my `repro.py`:\n```python\n@app.get(\"/dep_async_wrapped\")\nasync def test_dep_async_wrapped(val = Depends(wrapped_async)):\n    return {\"val\": val}\n```\nThe response was `{'val': 'async'}`. This means FastAPI *did* await it!\n\nWait, why did `dep_reg_wrapped` fail?\n`wrapped_reg` is an `async def`.\n\nLet's re-examine `dep_reg_wrapped`:\n```python\n@app.get(\"/dep_reg_wrapped\")\nasync def test_dep_reg_wrapped(val = Depends(wrapped_reg)):\n    return {\"val\": val}\n```\n`wrapped_reg` is created by `async_wrapper(reg_func)`.\n`async_wrapper` returns `wrapper` which is `async def wrapper`.\n\nWait, I might have misread the output.\n`Testing dep_reg_wrapped...`\n`Error: [TypeError(\"'coroutine' object is not iterable\"), TypeError('vars() argument must have __dict__ attribute')]`\n\nThis is strange. Let's try to simplify the repro and see what's happening.\n\nActually, the issue says: \"The logic to analyze if a function is an async, generator, async generator, callable instance, etc. now also checks and unwraps and extracts partials in all those levels.\"\n\nThis suggests that FastAPI has some logic to determine if a callable is async.\n\nLet's search for where FastAPI checks if a function is async.\nIdentifiers: `iscoroutinefunction`, `isasyncgenfunction`, `partial`, `wraps`.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_6",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "{ git log -n 50 --name-only --pretty=format: | grep -E '\\.py$' | sort | uniq -c | awk '{c=$1; if (c>5) c=5; print c, $2}'; for i in iscoroutinefunction isasyncgenfunction partial wraps; do git grep -l -F -e \"$i\" -- '*.py' | awk -v n=\"$(git grep -l -F -e \"$i\" -- '*.py' | wc -l)\" 'n>0 && n<=40 {print 3, $1}'; done; } | grep -vE '(^|/)tests?/|(^|/)test_[^/]*\\.py$|_test\\.py$|conftest\\.py$' | awk '{s[$2]+=$1} END {for (f in s) print s[f], f}' | sort -rn | head -10\n"
+          },
+          "extra": {
+            "elapsed_s": 82.11387825012207,
+            "timestamp": 1792563403.1981215,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"11 fastapi/dependencies/models.py\\n8 fastapi/routing.py\\n5 fastapi/dependencies/utils.py\\n5 fastapi/__init__.py\\n4 fastapi/_compat/v2.py\\n3 scripts/translate.py\\n3 scripts/mkdocs_hooks.py\\n1 tests/forward_reference_type.py\\n1 fastapi/utils.py\\n1 fastapi/encoders.py\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 82.40227341651917,
+          "timestamp": 1792563403.4865167,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 6629,
+        "completion_tokens": 980,
+        "cached_tokens": 0,
+        "total_tokens": 7609
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 82.11387825012207,
+        "timestamp": 1792563403.1981215,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 5,
+      "source": "agent",
+      "message": "`fastapi/dependencies/utils.py` and `fastapi/routing.py` seem like good candidates.\n\nLet's search for where it checks for async functions in these files.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_9",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "grep -n -E \"iscoroutinefunction|isasyncgenfunction\" fastapi/dependencies/utils.py fastapi/routing.py\n"
+          },
+          "extra": {
+            "elapsed_s": 85.28053712844849,
+            "timestamp": 1792563406.3647804,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"fastapi/routing.py:132:    # assert asyncio.iscoroutinefunction(func), \\\"WebSocket endpoints must be async\\\"\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 85.32859587669373,
+          "timestamp": 1792563406.4128392,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 7739,
+        "completion_tokens": 88,
+        "cached_tokens": 0,
+        "total_tokens": 7827
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 85.28053712844849,
+        "timestamp": 1792563406.3647804,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 6,
+      "source": "agent",
+      "message": "That's not much. Let's search for `partial` and `wraps` in `fastapi/dependencies/utils.py` and `fastapi/routing.py`.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_12",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "grep -n -E \"partial|wraps\" fastapi/dependencies/utils.py fastapi/routing.py\n"
+          },
+          "extra": {
+            "elapsed_s": 88.53347158432007,
+            "timestamp": 1792563409.617715,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"fastapi/routing.py:92:        func if is_async_callable(func) else functools.partial(run_in_threadpool, func)  # type:ignore\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 88.58233666419983,
+          "timestamp": 1792563409.66658,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 7893,
+        "completion_tokens": 82,
+        "cached_tokens": 0,
+        "total_tokens": 7975
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 88.53347158432007,
+        "timestamp": 1792563409.617715,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 7,
+      "source": "agent",
+      "message": "`is_async_callable` in `fastapi/routing.py`! Let's find where `is_async_callable` is defined.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_15",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "grep -r \"def is_async_callable\" fastapi/\n"
+          },
+          "extra": {
+            "elapsed_s": 90.62532258033752,
+            "timestamp": 1792563411.7095659,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"error\", \"error_type\": \"CommandError\", \"error_message\": \"\", \"details\": {\"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 1}}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 90.67484474182129,
+          "timestamp": 1792563411.759088,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 8053,
+        "completion_tokens": 65,
+        "cached_tokens": 0,
+        "total_tokens": 8118
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 90.62532258033752,
+        "timestamp": 1792563411.7095659,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 8,
+      "source": "agent",
+      "message": "Maybe it's imported. Let's check imports in `fastapi/routing.py`.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_18",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "grep \"is_async_callable\" fastapi/routing.py\n"
+          },
+          "extra": {
+            "elapsed_s": 93.60442018508911,
+            "timestamp": 1792563414.6886635,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"from starlette._utils import is_async_callable\\n        func if is_async_callable(func) else functools.partial(run_in_threadpool, func)  # type:ignore\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 93.65311884880066,
+          "timestamp": 1792563414.7373621,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 8170,
+        "completion_tokens": 53,
+        "cached_tokens": 0,
+        "total_tokens": 8223
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 93.60442018508911,
+        "timestamp": 1792563414.6886635,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 9,
+      "source": "agent",
+      "message": "It's from `starlette._utils`. But the issue is in `fastapi`. Wait, the issue says \"The logic to analyze if a function is an async, generator, async generator, callable instance, etc. now also checks and unwraps and extracts partials in all those levels.\"\n\nMaybe FastAPI has its own version or it's overriding something? Or maybe it's in `fastapi/dependencies/utils.py`?\n\nLet's check `fastapi/dependencies/utils.py` again.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_21",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "grep -n \"async\" fastapi/dependencies/utils.py | head -20\n"
+          },
+          "extra": {
+            "elapsed_s": 98.07121086120605,
+            "timestamp": 1792563419.1554542,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"54:    asynccontextmanager,\\n270:                (dependant.is_gen_callable or dependant.is_async_gen_callable)\\n547:async def _solve_generator(\\n553:    elif dependant.is_async_gen_callable:\\n554:        cm = asynccontextmanager(dependant.call)(**sub_values)\\n555:    return await stack.enter_async_context(cm)\\n567:async def solve_dependencies(\\n578:    async_exit_stack: AsyncExitStack,\\n626:            async_exit_stack=async_exit_stack,\\n636:            use_sub_dependant.is_gen_callable or use_sub_dependant.is_async_gen_callable\\n877:async def _extract_form_body(\\n901:            async def process_fn(\\n907:            async with anyio.create_task_group() as tg:\\n924:async def request_body_to_args(\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 98.11910796165466,
+          "timestamp": 1792563419.2033513,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 8304,
+        "completion_tokens": 148,
+        "cached_tokens": 0,
+        "total_tokens": 8452
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 98.07121086120605,
+        "timestamp": 1792563419.1554542,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 10,
+      "source": "agent",
+      "message": "I see `dependant.is_gen_callable` and `dependant.is_async_gen_callable`. Where is `dependant` created?\n\n`dependant` is likely an instance of `Dependant` class in `fastapi/dependencies/models.py`. Let's check that file.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_24",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "read_file fastapi/dependencies/models.py\n"
+          },
+          "extra": {
+            "elapsed_s": 101.23731327056885,
+            "timestamp": 1792563422.3215566,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"error\", \"error_type\": \"CommandError\", \"error_message\": \"/bin/bash: line 1: read_file: command not found\\n\", \"details\": {\"stdout\": \"\", \"stderr\": \"/bin/bash: line 1: read_file: command not found\\n\", \"exit_code\": 127}}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 101.28421568870544,
+          "timestamp": 1792563422.368459,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 8731,
+        "completion_tokens": 96,
+        "cached_tokens": 0,
+        "total_tokens": 8827
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 101.23731327056885,
+        "timestamp": 1792563422.3215566,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 11,
+      "source": "agent",
+      "message": "I used `read_file` as a shell command. I should use the tool.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_27",
+          "function_name": "read_file",
+          "arguments": {
+            "filepath": "fastapi/dependencies/models.py"
+          },
+          "extra": {
+            "elapsed_s": 102.67362809181213,
+            "timestamp": 1792563423.7578714,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"filepath\": \"fastapi/dependencies/models.py\", \"content\": \"import inspect\\nimport sys\\nfrom dataclasses import dataclass, field\\nfrom functools import cached_property, partial\\nfrom typing import Any, Callable, List, Optional, Sequence, Union\\n\\nfrom fastapi._compat import ModelField\\nfrom fastapi.security.base import SecurityBase\\nfrom fastapi.types import DependencyCacheKey\\nfrom typing_extensions import Literal\\n\\nif sys.version_info >= (3, 13):  # pragma: no cover\\n    from inspect import iscoroutinefunction\\nelse:  # pragma: no cover\\n    from asyncio import iscoroutinefunction\\n\\n\\n@dataclass\\nclass SecurityRequirement:\\n    security_scheme: SecurityBase\\n    scopes: Optional[Sequence[str]] = None\\n\\n\\n@dataclass\\nclass Dependant:\\n    path_params: List[ModelField] = field(default_factory=list)\\n    query_params: List[ModelField] = field(default_factory=list)\\n    header_params: List[ModelField] = field(default_factory=list)\\n    cookie_params: List[ModelField] = field(default_factory=list)\\n    body_params: List[ModelField] = field(default_factory=list)\\n    dependencies: List[\\\"Dependant\\\"] = field(default_factory=list)\\n    security_requirements: List[SecurityRequirement] = field(default_factory=list)\\n    name: Optional[str] = None\\n    call: Optional[Callable[..., Any]] = None\\n    request_param_name: Optional[str] = None\\n    websocket_param_name: Optional[str] = None\\n    http_connection_param_name: Optional[str] = None\\n    response_param_name: Optional[str] = None\\n    background_tasks_param_name: Optional[str] = None\\n    security_scopes_param_name: Optional[str] = None\\n    own_oauth_scopes: Optional[List[str]] = None\\n    parent_oauth_scopes: Optional[List[str]] = None\\n    use_cache: bool = True\\n    path: Optional[str] = None\\n    scope: Union[Literal[\\\"function\\\", \\\"request\\\"], None] = None\\n\\n    @cached_property\\n    def oauth_scopes(self) -> List[str]:\\n        scopes = self.parent_oauth_scopes.copy() if self.parent_oauth_scopes else []\\n        # This doesn't use a set to preserve order, just in case\\n        for scope in self.own_oauth_scopes or []:\\n            if scope not in scopes:\\n                scopes.append(scope)\\n        return scopes\\n\\n    @cached_property\\n    def cache_key(self) -> DependencyCacheKey:\\n        scopes_for_cache = (\\n            tuple(sorted(set(self.oauth_scopes or []))) if self._uses_scopes else ()\\n        )\\n        return (\\n            self.call,\\n            scopes_for_cache,\\n            self.computed_scope or \\\"\\\",\\n        )\\n\\n    @cached_property\\n    def _uses_scopes(self) -> bool:\\n        if self.own_oauth_scopes:\\n            return True\\n        if self.security_scopes_param_name is not None:\\n            return True\\n        for sub_dep in self.dependencies:\\n            if sub_dep._uses_scopes:\\n                return True\\n        return False\\n\\n    @cached_property\\n    def _unwrapped_call(self) -> Any:\\n        if self.call is None:\\n            return self.call  # pragma: no cover\\n        unwrapped = inspect.unwrap(self.call)\\n        if isinstance(unwrapped, partial):\\n            unwrapped = unwrapped.func\\n        return unwrapped\\n\\n    @cached_property\\n    def is_gen_callable(self) -> bool:\\n        if inspect.isgeneratorfunction(self._unwrapped_call):\\n            return True\\n        dunder_call = getattr(self._unwrapped_call, \\\"__call__\\\", None)  # noqa: B004\\n        return inspect.isgeneratorfunction(dunder_call)\\n\\n    @cached_property\\n    def is_async_gen_callable(self) -> bool:\\n        if inspect.isasyncgenfunction(self._unwrapped_call):\\n            return True\\n        dunder_call = getattr(self._unwrapped_call, \\\"__call__\\\", None)  # noqa: B004\\n        return inspect.isasyncgenfunction(dunder_call)\\n\\n    @cached_property\\n    def is_coroutine_callable(self) -> bool:\\n        if inspect.isroutine(self._unwrapped_call):\\n            return iscoroutinefunction(self._unwrapped_call)\\n        if inspect.isclass(self._unwrapped_call):\\n            return False\\n        dunder_call = getattr(self._unwrapped_call, \\\"__call__\\\", None)  # noqa: B004\\n        return iscoroutinefunction(dunder_call)\\n\\n    @cached_property\\n    def computed_scope(self) -> Union[str, None]:\\n        if self.scope:\\n            return self.scope\\n        if self.is_gen_callable or self.is_async_gen_callable:\\n            return \\\"request\\\"\\n        return None\", \"start_line\": 1, \"end_line\": 116, \"total_lines\": 116, \"is_truncated\": false}",
+        "extra": {
+          "tool_name": "read_file",
+          "elapsed_s": 102.72696566581726,
+          "timestamp": 1792563423.811209,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 8917,
+        "completion_tokens": 44,
+        "cached_tokens": 0,
+        "total_tokens": 8961
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 102.67362809181213,
+        "timestamp": 1792563423.7578714,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 12,
+      "source": "agent",
+      "message": "I found it! In `fastapi/dependencies/models.py`, the `Dependant` class has several `cached_property` methods: `_unwrapped_call`, `is_gen_callable`, `is_async_gen_callable`, and `is_coroutine_callable`.\n\nLet's look at `_unwrapped_call`:\n```python\n    @cached_property\n    def _unwrapped_call(self) -> Any:\\n        if self.call is None:\\n            return self.call  # pragma: no cover\\n        unwrapped = inspect.unwrap(self.call)\\n        if isinstance(unwrapped, partial):\\n            unwrapped = unwrapped.func\\n        return unwrapped\n```\nThis only unwraps once and then checks for `partial` once. But what if it's a `partial` of a wrapped function, or a wrapped `partial`?\n\nThe issue says: \"The logic to analyze if a function is an async, generator, async generator, callable instance, etc. now also checks and unwraps and extracts partials in all those levels.\"\n\nAnd \"if either is async, then it has to be awaited, no matter if the other is not async.\"\n\nWait, `inspect.unwrap` removes decorators that use `functools.wraps`.\nIf we have `partial(wrapped_func)`, `inspect.unwrap` won't work on the `partial` object itself.\nIf we have `wrapped(partial_func)`, `inspect.unwrap` will get to the `partial` object.\n\nThe current implementation of `_unwrapped_call` does:\n1. `unwrapped = inspect.unwrap(self.call)`\n2. `if isinstance(unwrapped, partial): unwrapped = unwrapped.func`\n\nIf `self.call` is `partial(wrapped_func)`, `inspect.unwrap` does nothing. Then it sees it's a `partial` and takes `.func` (which is `wrapped_func`). But `wrapped_func` is still wrapped! It needs to be unwrapped.\n\nIf `self.call` is `wrapped(partial_func)`, `inspect.unwrap` gets to `partial_func`. Then it sees it's a `partial` and takes `.func`.\n\nSo it should be a loop.\n\nAlso, the issue says: \"if either is async, then it has to be awaited, no matter if the other is not async.\"\n\nThis is interesting. `is_coroutine_callable` currently uses `_unwrapped_call`.\n\n```python\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nIf `self.call` is a regular function wrapped by an async wrapper, `_unwrapped_call` will return the regular function (because `inspect.unwrap` removes the wrapper). Then `is_coroutine_callable` will return `False`. But the wrapper *is* async, so it *should* be awaited!\n\nSo `is_coroutine_callable` should check if *any* of the wrappers in the chain are async, or if the final unwrapped function is async.\n\nWait, if `self.call` is an `async def` wrapper around a regular function, `iscoroutinefunction(self.call)` is `True`.\nBut `_unwrapped_call` returns the regular function.\n\nLet's see:\n```python\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n```\nIf `self.call` is `async_wrapper(reg_func)`, then `self._unwrapped_call` is `reg_func`. `iscoroutinefunction(reg_func)` is `False`.\n\nBut we want it to be `True` because `self.call` is async.\n\nSo we should check `iscoroutinefunction` on the original `self.call` AND on the unwrapped one.\n\nActually, we should probably check every level of unwrapping.\n\nLet's refine `_unwrapped_call` to be a loop and also keep track of whether any of them were async.\n\nBut `is_coroutine_callable` is a property.\n\nIf we change `_unwrapped_call` to just be the fully unwrapped function, we still need to know if any of the wrappers were async.\n\nWait, if `self.call` is an `async def` function, `iscoroutinefunction(self.call)` is `True`.\nIf `self.call` is a `partial` of an `async def` function, `iscoroutinefunction(self.call)` is `False`.\n\nSo we need to:\n1. Unwrap the function completely (handling both `wraps` and `partial`).\n2. Along the way, if we encounter any async function, mark it as async.\n\nLet's see how to implement this.\n\n```python\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        # Check if the original call is async\n        if iscoroutinefunction(self.call):\n            return True\n        \n        # Now unwrap and check each level\n        current = self.call\n        while True:\n            # Unwrap wraps\n            unwrapped = inspect.unwrap(current)\n            if unwrapped is not current:\n                if iscoroutinefunction(unwrapped):\n                    return True\n                current = unwrapped\n            else:\n                # No more wraps. Check if it's a partial.\n                if isinstance(current, partial):\n                    current = current.func\n                    if iscoroutinefunction(current):\n                        return True\n                else:\n                    # No more wraps and not a partial.\n                    # Check if it's a class with __call__\n                    dunder_call = getattr(current, \"__call__\", None)\n                    if dunder_call and iscoroutinefunction(dunder_call):\n                        return True\n                    break\n        return False\n```\n\nWait, this is getting complex. Let's see if there's a simpler way.\n\nThe issue says: \"The logic to analyze if a function is an async, generator, async generator, callable instance, etc. now also checks and unwraps and extracts partials in all those levels.\"\n\nThis suggests that `is_gen_callable`, `is_async_gen_callable`, and `is_coroutine_callable` should all be updated.\n\nLet's look at `is_gen_callable`:\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n```\n\nIf we have a generator wrapped by a regular function, `_unwrapped_call` will find the generator.\nIf we have a regular function wrapped by a generator, `_unwrapped_call` will find the regular function, and `is_gen_callable` will be `False`. But it should be `True` because the wrapper is a generator!\n\nSo for all these, we need to check the whole chain.\n\nLet's implement a helper method to get all \"versions\" of the callable.\n\n```python\n    def _get_all_callables(self) -> List[Any]:\n        callables = [self.call]\n        current = self.call\n        while True:\n            # Try unwrapping\n            unwrapped = inspect.unwrap(current)\n            if unwrapped is not current:\n                callables.append(unwrapped)\n                current = unwrapped\n                continue\n            \n            # Try partial\n            if isinstance(current, partial):\n                current = current.func\n                callables.append(current)\n                continue\n            \n            break\n        return callables\n```\n\nWait, `inspect.unwrap` already handles multiple levels of `wraps`.\n\nIf I have `f1` wrapped by `f2` wrapped by `f3`, `inspect.unwrap(f3)` returns `f1`.\n\nSo the loop should be:\n1. Start with `current = self.call`.\n2. While `current` is not None:\n   a. Add `current` to the list.\n   b. `unwrapped = inspect.unwrap(current)`\n   c. If `unwrapped` is `current`, then check if `current` is a `partial`.\n   d. If it is a `partial`, `current = current.func`.\n   e. Else, break.\n   f. Else, `current = unwrapped`.\n\nExample: `partial(wrapped_func)`\n1. `current = partial(wrapped_func)`. List: `[partial(wrapped_func)]`.\n2. `unwrapped = inspect.unwrap(partial(wrapped_func))` -> `partial(wrapped_func)`.\n3. `current` is `partial`, so `current = wrapped_func`.\n4. Loop: `current = wrapped_func`. List: `[partial(wrapped_func), wrapped_func]`.\n5. `unwrapped = inspect.unwrap(wrapped_func)` -> `original_func`.\n6. `current = original_func`.\n7. Loop: `current = original_func`. List: `[partial(wrapped_func), wrapped_func, original_func]`.\n8. `unwrapped = inspect.unwrap(original_func)` -> `original_func`.\n9. `current` is not `partial`. Break.\n\nThis seems correct.\n\nNow we can update the properties:\n\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isgeneratorfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)\n            if inspect.isgeneratorfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isasyncgenfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)\n            if inspect.isasyncgenfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isroutine(c):\n                if iscoroutinefunction(c):\n                    return True\n            elif inspect.isclass(c):\n                pass # classes are not coroutines themselves\n            else:\n                dunder_call = getattr(c, \"__call__\", None)\n                if iscoroutinefunction(dunder_call):\n                    return True\n        return False\n```\n\nWait, `is_coroutine_callable` had this:\n```python\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nIf `c` is a class, `inspect.isroutine(c)` is `False`. `inspect.isclass(c)` is `True`.\nIf `c` is a function, `inspect.isroutine(c)` is `True`.\n\nSo my proposed `is_coroutine_callable` is similar.\n\nLet's check if `_unwrapped_call` is still needed. It's used in `cache_key` and `computed_scope`.\n\n```python\n    @cached_property\n    def cache_key(self) -> DependencyCacheKey:\n        # ...\n        return (\n            self.call,\n            scopes_for_cache,\n            self.computed_scope or \"\",\n        )\n```\nWait, `cache_key` uses `self.call`, not `self._unwrapped_call`.\n\nWait, I misread `cache_key` in the `read_file` output:\n```python\n    @cached_property\n    def cache_key(self) -> DependencyCacheKey:\n        scopes_for_cache = (\n            tuple(sorted(set(self.oauth_scopes or []))) if self._uses_scopes else ()\n        )\n        return (\n            self.call,\n            scopes_for_cache,\n            self.computed_scope or \"\",\n        )\n```\nYes, it uses `self.call`.\n\nWhat about `computed_scope`?\n```python\n    @cached_property\n    def computed_scope(self) -> Union[str, None]:\n        if self.scope:\n            return self.scope\n        if self.is_gen_callable or self.is_async_gen_callable:\n            return \"request\"\n        return None\n```\nIt uses `is_gen_callable` and `is_async_gen_callable`.\n\nSo `_unwrapped_call` is only used by `is_gen_callable`, `is_async_gen_callable`, and `is_coroutine_callable`.\n\nIf I implement `_get_all_callables`, I can remove `_unwrapped_call` or keep it for backward compatibility (though it's a private property).\n\nActually, `_unwrapped_call` is used in `is_gen_callable` etc.\n\nLet's see if I can just modify `_unwrapped_call` to return the fully unwrapped one, and then modify the other properties to check the chain.\n\nBut `_unwrapped_call` only returns ONE value.\n\nIf I want to check the chain, I need the chain.\n\nLet's implement `_get_all_callables` and update the properties.\n\nWait, I should check if `iscoroutinefunction` is available.\nIn `fastapi/dependencies/models.py`:\n```python\nif sys.version_info >= (3, 13):  # pragma: no cover\n    from inspect import iscoroutinefunction\nelse:  # pragma: no cover\n    from asyncio import iscoroutinefunction\n```\nYes, it is.\n\nLet's refine the `_get_all_callables` implementation.\n\n```python\n    def _get_all_callables(self) -> List[Any]:\n        callables = []\n        current = self.call\n        while current is not None:\n            callables.append(current)\n            unwrapped = inspect.unwrap(current)\n            if unwrapped is not current:\n                current = unwrapped\n            elif isinstance(current, partial):\n                current = current.func\n            else:\n                break\n        return callables\n```\n\nWait, if `current` is a `partial` of a wrapped function, `inspect.unwrap(current)` will be `current`. Then `isinstance(current, partial)` will be `True`, and `current` becomes `current.func`. Then in the next iteration, `inspect.unwrap(current)` will unwrap the wrapped function. This works.\n\nIf `current` is a wrapped `partial`, `inspect.unwrap(current)` will be the `partial`. Then in the next iteration, `inspect.unwrap(current)` will be the `partial` again, and `isinstance(current, partial)` will be `True`, and `current` becomes `current.func`. This also works.\n\nNow let's update the properties.\n\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isgeneratorfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isgeneratorfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isasyncgenfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isasyncgenfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isroutine(c):\n                if iscoroutinefunction(c):\n                    return True\n            elif inspect.isclass(c):\n                pass\n            else:\n                dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n                if iscoroutinefunction(dunder_call):\n                    return True\n        return False\n```\n\nWait, `is_coroutine_callable` in the original code:\n```python\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nIf `self._unwrapped_call` is",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_30",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 /tmp/repro.py\n"
+          },
+          "extra": {
+            "elapsed_s": 239.29919242858887,
+            "timestamp": 1792563560.3834357,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"Testing dep_reg_wrapped...\\nError: [TypeError(\\\"'coroutine' object is not iterable\\\"), TypeError('vars() argument must have __dict__ attribute')]\\n\\nTesting dep_async_wrapped...\\nResponse: {'val': 'async'}\\n\\nTesting dep_partial_async...\\nResponse: {'val': 'async'}\\n\", \"stderr\": \"<sys>:0: RuntimeWarning: coroutine 'reg_func' was never awaited\\nRuntimeWarning: Enable tracemalloc to get the object allocation traceback\\n\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 239.93317294120789,
+          "timestamp": 1792563561.0174162,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 10303,
+        "completion_tokens": 4122,
+        "cached_tokens": 0,
+        "total_tokens": 14425
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 239.29919242858887,
+        "timestamp": 1792563560.3834357,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 13,
+      "source": "agent",
+      "message": "Wait, I already ran the repro. `dep_reg_wrapped` failed.\n`wrapped_reg` is an `async def` wrapper around a regular function.\n`iscoroutinefunction(wrapped_reg)` is `True`.\nBut `_unwrapped_call` returns the regular function.\nAnd `is_coroutine_callable` uses `_unwrapped_call`.\nSo `is_coroutine_callable` returns `False`.\nFastAPI then thinks it's a regular function and calls it.\nBut it's an `async def`, so it returns a coroutine.\nFastAPI then tries to use this coroutine as the dependency value.\nIf the dependency is used in a way that expects a value (like in my repro), it might fail.\n\nWait, if `is_coroutine_callable` is `False`, FastAPI calls it.\nIf it's a regular function, it returns a value.\nIf it's an `async def` function, it returns a coroutine.\nFastAPI then uses this coroutine as the value.\n\nIn my repro:\n```python\n@app.get(\"/dep_reg_wrapped\")\nasync def test_dep_reg_wrapped(val = Depends(wrapped_reg)):\n    return {\"val\": val}\n```\n`val` becomes the coroutine object.\nThen FastAPI tries to serialize `{\"val\": <coroutine object ...>}` to JSON.\nPydantic/FastAPI might try to iterate over it or something?\nThe error was `TypeError(\"'coroutine' object is not iterable\")`.\n\nYes, this confirms that `is_coroutine_callable` should have been `True`.\n\nNow let's apply the fix to `fastapi/dependencies/models.py`.\n\nI will:\n1. Add `_get_all_callables` method.\n2. Update `is_gen_callable`.\n3. Update `is_async_gen_callable`.\n4. Update `is_coroutine_callable`.\n5. Remove `_unwrapped_call` if it's no longer used.\n\nWait, let's check if `_unwrapped_call` is used anywhere else.\nI'll use `grep`.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_33",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "grep -r \"_unwrapped_call\" fastapi/\n"
+          },
+          "extra": {
+            "elapsed_s": 263.935555934906,
+            "timestamp": 1792563585.0197992,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"fastapi/dependencies/models.py:    def _unwrapped_call(self) -> Any:\\nfastapi/dependencies/models.py:        if inspect.isgeneratorfunction(self._unwrapped_call):\\nfastapi/dependencies/models.py:        dunder_call = getattr(self._unwrapped_call, \\\"__call__\\\", None)  # noqa: B004\\nfastapi/dependencies/models.py:        if inspect.isasyncgenfunction(self._unwrapped_call):\\nfastapi/dependencies/models.py:        dunder_call = getattr(self._unwrapped_call, \\\"__call__\\\", None)  # noqa: B004\\nfastapi/dependencies/models.py:        if inspect.isroutine(self._unwrapped_call):\\nfastapi/dependencies/models.py:            return iscoroutinefunction(self._unwrapped_call)\\nfastapi/dependencies/models.py:        if inspect.isclass(self._unwrapped_call):\\nfastapi/dependencies/models.py:        dunder_call = getattr(self._unwrapped_call, \\\"__call__\\\", None)  # noqa: B004\\n\", \"stderr\": \"grep: fastapi/dependencies/__pycache__/models.cpython-313.pyc: binary file matches\\n\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 263.9872376918793,
+          "timestamp": 1792563585.071481,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 14573,
+        "completion_tokens": 513,
+        "cached_tokens": 0,
+        "total_tokens": 15086
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 263.935555934906,
+        "timestamp": 1792563585.0197992,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 14,
+      "source": "agent",
+      "message": "It's only used in `fastapi/dependencies/models.py`.\n\nLet's implement the changes.\n\nI'll replace `_unwrapped_call` and the three properties.\n\n```python\n    @cached_property\n    def _unwrapped_call(self) -> Any:\n        if self.call is None:\n            return self.call  # pragma: no cover\n        unwrapped = inspect.unwrap(self.call)\n        if isinstance(unwrapped, partial):\n            unwrapped = unwrapped.func\n        return unwrapped\n\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        if inspect.isasyncgenfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isasyncgenfunction(dunder_call)\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nI will replace this whole block.\n\nWait, I should be careful about the `_get_all_callables` method. I'll add it before `is_gen_callable`.\n\nActually, I can just implement the loop inside each property, but that's repetitive.\n\nLet's use a helper method.\n\n```python\n    def _get_all_callables(self) -> List[Any]:\n        callables = []\n        current = self.call\n        while current is not None:\n            callables.append(current)\n            unwrapped = inspect.unwrap(current)\n            if unwrapped is not current:\n                current = unwrapped\n            elif isinstance(current, partial):\n                current = current.func\n            else:\n                break\n        return callables\n```\n\nWait, `_get_all_callables` should probably be a method, not a `cached_property` because it returns a list.\n\nLet's see where to insert it.\n\n```python\n    @cached_property\n    def _unwrapped_call(self) -> Any:\n        # ...\n```\n\nI'll replace from `_unwrapped_call` to `is_coroutine_callable`.\n\nOne detail: `is_coroutine_callable` had:\n```python\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nIf I use `_get_all_callables`, I should make sure I maintain this logic.\n\n```python\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isroutine(c):\n                if iscoroutinefunction(c):\n                    return True\n            elif inspect.isclass(c):\n                continue\n            else:\n                dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n                if iscoroutinefunction(dunder_call):\n                    return True\n        return False\n```\n\nWait, if `c` is a class, `inspect.isroutine(c)` is `False`. `inspect.isclass(c)` is `True`.\nIn the original code, if `_unwrapped_call` was a class, it returned `False` immediately.\nBut in my loop, if one of the wrappers is a class, I should just continue to the next one.\n\nWait, if `self.call` is a class, and it's not wrapped, then `_get_all_callables` returns `[self.call]`.\nThen `inspect.isroutine(self.call)` is `False`. `inspect.isclass(self.call)` is `True`.\nThe loop continues.\nThen it returns `False`.\nThis matches the original behavior for a class.\n\nWhat if `self.call` is a class that has an `async def __call__`?\nOriginal code:\n`_unwrapped_call` is the class.\n`inspect.isroutine(class)` is `False`.\n`inspect.isclass(class)` is `True`.\nReturns `False`.\n\nWait!\n```python\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\nIf `_unwrapped_call` is a class, it returns `False` and NEVER checks `__call__`.\nSo a class with `async def __call__` is NOT considered a coroutine callable.\n\nMy proposed loop:\n```python\n            elif inspect.isclass(c):\n                continue\n```\nThis also skips `__call__` for classes.\n\nWait, if `c` is not a routine and not a class, it checks `__call__`.\nWhat is not a routine and not a class but has `__call__`?\nMaybe an instance of a class?\nYes, `inspect.isroutine` returns `True` for functions and methods.\nAn instance of a class is not a routine.\n\nSo if `c` is an instance of a class, `inspect.isroutine(c)` is `False`, `inspect.isclass(c)` is `False`, and it checks `c.__call__`.\n\nThis matches the original logic.\n\nLet's double check `is_gen_callable`.\nOriginal:\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n```\nIt checks `isgeneratorfunction` on `_unwrapped_call` AND on `_unwrapped_call.__call__`.\nNote that `inspect.isgeneratorfunction` returns `False` for classes.\n\nMy proposed loop:\n```python\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isgeneratorfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isgeneratorfunction(dunder_call):\n                return True\n        return False\n```\nThis also matches.\n\nOne more thing: `_get_all_callables` should probably be a method, not a `cached_property` because it's used by other `cached_property`s.\n\nWait, if I make it a method, it's called every time. That's fine, it's a small loop.\n\nLet's prepare the replacement.\n\n```python\n    def _get_all_callables(self) -> List[Any]:\n        callables = []\n        current = self.call\n        while current is not None:\n            callables.append(current)\n            unwrapped = inspect.unwrap(current)\n            if unwrapped is not current:\n                current = unwrapped\n            elif isinstance(current, partial):\n                current = current.func\n            else:\n                break\n        return callables\n\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isgeneratorfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isgeneratorfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isasyncgenfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isasyncgenfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isroutine(c):\n                if iscoroutinefunction(c):\n                    return True\n            elif inspect.isclass(c):\n                continue\n            else:\n                dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n                if iscoroutinefunction(dunder_call):\n                    return True\n        return False\n```\n\nI'll replace the block from `_unwrapped_call` to `is_coroutine_callable`.\n\nWait, I should check the indentation. `Dependant` is a dataclass.\n\n```python\n@dataclass\nclass Dependant:\n    # ...\n    @cached_property\n    def _unwrapped_call(self) -> Any:\n        # ...\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        # ...\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        # ...\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        # ...\n```\n\nThe replacement block:\n\n```python\n    def _get_all_callables(self) -> List[Any]:\n        callables = []\n        current = self.call\n        while current is not None:\n            callables.append(current)\n            unwrapped = inspect.unwrap(current)\n            if unwrapped is not current:\n                current = unwrapped\n            elif isinstance(current, partial):\n                current = current.func\n            else:\n                break\n        return callables\n\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isgeneratorfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isgeneratorfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isasyncgenfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isasyncgenfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isroutine(c):\n                if iscoroutinefunction(c):\n                    return True\n            elif inspect.isclass(c):\n                continue\n            else:\n                dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n                if iscoroutinefunction(dunder_call):\n                    return True\n        return False\n```\n\nLet's use a heredoc to replace the block.\n\nWait, I should make sure I don't leave `_unwrapped_call` if I'm replacing it.\n\nThe original block:\n```python\n    @cached_property\n    def _unwrapped_call(self) -> Any:\n        if self.call is None:\n            return self.call  # pragma: no cover\n        unwrapped = inspect.unwrap(self.call)\n        if isinstance(unwrapped, partial):\n            unwrapped = unwrapped.func\n        return unwrapped\n\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        if inspect.isasyncgenfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isasyncgenfunction(dunder_call)\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n```\n\nI will replace this entire section.\n\nWait, I should check if `List` is imported.\n`from typing import Any, Callable, List, Optional, Sequence, Union`\nYes, it is.\n\nLet's do it.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_36",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 - <<'PY'\nfrom pathlib import Path\np = Path('fastapi/dependencies/models.py'); s = p.read_text()\nold = '''    @cached_property\n    def _unwrapped_call(self) -> Any:\n        if self.call is None:\n            return self.call  # pragma: no cover\n        unwrapped = inspect.unwrap(self.call)\n        if isinstance(unwrapped, partial):\n            unwrapped = unwrapped.func\n        return unwrapped\n\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        if inspect.isgeneratorfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isgeneratorfunction(dunder_call)\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        if inspect.isasyncgenfunction(self._unwrapped_call):\n            return True\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return inspect.isasyncgenfunction(dunder_call)\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        if inspect.isroutine(self._unwrapped_call):\n            return iscoroutinefunction(self._unwrapped_call)\n        if inspect.isclass(self._unwrapped_call):\n            return False\n        dunder_call = getattr(self._unwrapped_call, \"__call__\", None)  # noqa: B004\n        return iscoroutinefunction(dunder_call)\n'''\nnew = '''    def _get_all_callables(self) -> List[Any]:\n        callables = []\n        current = self.call\n        while current is not None:\n            callables.append(current)\n            unwrapped = inspect.unwrap(current)\n            if unwrapped is not current:\n                current = unwrapped\n            elif isinstance(current, partial):\n                current = current.func\n            else:\n                break\n        return callables\n\n    @cached_property\n    def is_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isgeneratorfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isgeneratorfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_async_gen_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isasyncgenfunction(c):\n                return True\n            dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n            if inspect.isasyncgenfunction(dunder_call):\n                return True\n        return False\n\n    @cached_property\n    def is_coroutine_callable(self) -> bool:\n        for c in self._get_all_callables():\n            if inspect.isroutine(c):\n                if iscoroutinefunction(c):\n                    return True\n            elif inspect.isclass(c):\n                continue\n            else:\n                dunder_call = getattr(c, \"__call__\", None)  # noqa: B004\n                if iscoroutinefunction(dunder_call):\n                    return True\n        return False\n'''\nassert s.count(old) == 1, s.count(old)\np.write_text(s.replace(old, new))\nPY\n"
+          },
+          "extra": {
+            "elapsed_s": 427.3142387866974,
+            "timestamp": 1792563748.398482,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 427.39632296562195,
+          "timestamp": 1792563748.4805663,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 10627,
+        "completion_tokens": 4193,
+        "cached_tokens": 0,
+        "total_tokens": 14820
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 427.3142387866974,
+        "timestamp": 1792563748.398482,
+        "author": "swe_agent"
+      }
+    },
+    {
+      "step_id": 15,
+      "source": "agent",
+      "message": "Now let's verify with the reproduction script.",
+      "model_name": "gemma-4-31b-it-qat-w4a16-ct",
+      "tool_calls": [
+        {
+          "tool_call_id": "call_39",
+          "function_name": "run_command",
+          "arguments": {
+            "command": "python3 /tmp/repro.py\n"
+          },
+          "extra": {
+            "elapsed_s": 429.1069145202637,
+            "timestamp": 1792563750.1911578,
+            "author": "swe_agent",
+            "model_version": "gemma-4-31b-it-qat-w4a16-ct"
+          }
+        }
+      ],
+      "observation": {
+        "content": "{\"status\": \"ok\", \"stdout\": \"Testing dep_reg_wrapped...\\nResponse: {'val': 'reg'}\\n\\nTesting dep_async_wrapped...\\nResponse: {'val': 'async'}\\n\\nTesting dep_partial_async...\\nResponse: {'val': 'async'}\\n\", \"stderr\": \"\", \"exit_code\": 0}",
+        "extra": {
+          "tool_name": "run_command",
+          "elapsed_s": 429.7498803138733,
+          "timestamp": 1792563750.8341236,
+          "author": "swe_agent"
+        }
+      },
+      "metrics": {
+        "prompt_tokens": 14854,
+        "completion_tokens": 39,
+        "cached_tokens": 0,
+        "total_tokens": 14893
+      },
+      "llm_call_count": 1,
+      "extra": {
+        "event_type": "thinking",
+        "elapsed_s": 429.1069145202637,
+        "timestamp": 1792563750.1911578,
+        "author": "swe_agent"
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 120077,
+    "total_completion_tokens": 11620,
+    "total_cached_tokens": 0,
+    "total_tokens": 131697,
+    "total_steps": 15
+  }
+}
