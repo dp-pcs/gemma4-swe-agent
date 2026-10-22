@@ -648,3 +648,19 @@ The second agent pushed back on the Design A NO-GO verdict, correctly identifyin
 3. Submit T3_5m to Kaggle (scorer-safe hedge, unconditional 10.2h worst-case bound).
 
 VM `gemma-train2-20261016` restarted briefly to pull T3_5m's raw trace data (should have been committed in the original T3_5m session, wasn't — fixed now), stopped again after.
+
+**2026-10-22 (rig calibration, T3_5m submitted, thinking-budget screen launched):**
+
+**T3_5m submitted 2026-10-21 as Kaggle ref 57504748** (scorer-safe hedge, worst-case 10.2h under the 12h ceiling unconditionally). Not a quality claim vs T3_7m (net -3, p=0.55, n.s.); purpose is the hard budget bound for the final pick.
+
+**Rig calibration done.** Swept workers-per-endpoint 1-15 on the local A100 screening rig to find where per-stream decode matches L4's real uncontended rate (34.3 tok/s). **N=8 workers/endpoint → 33.6 tok/s** (closest match, diff -0.7). All prior screens (T1 through T3_5m) ran at N=5 → 37.0 tok/s, i.e., ~8% faster than the real scorer — screens have been mildly optimistic about per-task decode speed. Calibration results: `results/l4_benchmark_20261021/local_decode_results.json`.
+
+**Worktree mechanics test: PASS on all 4 repos** (requests/fastapi/rich/httpx) — diff exclusion (.wt/ never appears in `git add -N . && git diff HEAD`) and patch apply both clean. Test NOTE: the mechanics test accidentally used ~/matrix/.venv (the harness venv) via `pip install -e .` on each snapshot, polluting it with editable packages (httpx 1.0.dev3, requests dev, fastapi dev, rich dev) that broke import resolution for litellm/openai/swegemma. Took ~45 minutes to debug, uninstall, and reinstall proper versions. **Lesson: always use a throw-away venv or `--user` install for ad-hoc mechanic tests; never `pip install -e` anything in the harness venv.** Also lesson: run mechanics tests in a completely separate directory/venv environment from the screening infrastructure.
+
+**Thinking-budget screen running** (T3_5m vs T3_5m_tc1536, 38×3 = 228 runs, workers=8 calibrated). One-variable change: thinking_budget 4096→1536. Results pending (~30-40 min). Will set the thinking cap for P3 solvers. Also: T3_5m_tc1536 arm tree and arm files on VM; submission ZIP t3_5m_20261021.zip committed.
+
+**Design A (P3) next steps per converged plan:**
+- When thinking-budget screen completes, use winning cap in P3's solvers.
+- P3 design: 3 editing solvers each in their own git worktree, scripted selector (verified>diff-agreement>smallest, then `git apply` into /workspace + `submit_patch`). NOT sequential — all solvers run concurrently (ParallelAgent) so all three get the full available wall-clock minus locate/selector overhead (~215-245s each).
+- Still need: scripted selector implementation, no-submit nudge test (does the harness re-enter the root agent from step 1 if root finishes without submit_patch? Must verify).
+- Screen P3 against T3_5m_tc1536 (the thinking-budget winner) as the new baseline.
