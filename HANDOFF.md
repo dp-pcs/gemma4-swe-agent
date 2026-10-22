@@ -664,3 +664,19 @@ VM `gemma-train2-20261016` restarted briefly to pull T3_5m's raw trace data (sho
 - P3 design: 3 editing solvers each in their own git worktree, scripted selector (verified>diff-agreement>smallest, then `git apply` into /workspace + `submit_patch`). NOT sequential — all solvers run concurrently (ParallelAgent) so all three get the full available wall-clock minus locate/selector overhead (~215-245s each).
 - Still need: scripted selector implementation, no-submit nudge test (does the harness re-enter the root agent from step 1 if root finishes without submit_patch? Must verify).
 - Screen P3 against T3_5m_tc1536 (the thinking-budget winner) as the new baseline.
+
+**2026-10-22 (thinking-budget screen complete — neutral result, calibration finding):**
+
+**Thinking-budget screen result (T3_5m tc1536=1536 vs tc4096=4096, calibrated N=8, 38×3=114 each):**
+- T3_5m (thinking_budget=4096): 28/114 (24.6%), mean wall 301.8s, timeouts 79
+- T3_5m_tc1536 (thinking_budget=1536): 29/114 (25.4%), mean wall 305.7s, timeouts 78
+- Paired: W7/L6, net +1, p=1.0 — **NEUTRAL. No significant benefit from the thinking cap.**
+- Analysis: `results/l4_benchmark_20261021/gates_analysis_tc1536_calibrated.json`
+
+**Why neutral:** At N=8/34 tok/s, the binding constraint is wall-clock time (5-min cap) not tokens. 79/114 tasks timed out regardless of thinking cap. Cutting thinking budget doesn't reduce wall-clock proportionally enough to cross the timeout threshold for more tasks — it just shifts the token mix without meaningfully freeing time.
+
+**Calibration finding — screens at N=5 were more than 7% speed-optimistic:** Calibrated resolution rate (24-25%) is ~8pp lower than our prior N=5 screens' T3_5m rate (32.5%). The timeout amplification effect means that at real scorer speed, more tasks fail to complete before the 5-min cap, even though per-token decode is only 8% slower. This suggests our prior absolute resolution rates (35%+) overestimated real performance at the scorer more than just a hardware ratio suggests. Use calibrated rates (24-25% at N=8) as the more realistic reference for future predictions.
+
+**Decision: use thinking_budget=1536 for P3 solvers** (ties, doesn't hurt, marginally shortens thinking steps within each solver's wall-clock window — even if effect is unproven statistically). No need for a separate thinking-budget screen before building P3.
+
+**Next (P3 build):** 3 editing solvers in separate worktrees (diff exclusion confirmed PASS on all 4 repos), scripted selector (verified > diff-agreement > smallest, then git apply + submit_patch), concurrent ParallelAgent (all 3 solvers run in parallel, each gets the full available wall-clock minus locate/selector overhead). Selector must apply best patch to /workspace and call submit_patch FIRST before any deliberation, to survive harness nudge re-entry.
