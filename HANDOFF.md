@@ -631,3 +631,20 @@ Exchanged findings with a second agent (Claude Desktop, authored the Oct 21 deep
 3. Submit T3_5m to Kaggle as the scorer-safe hedge/final-pick candidate (not as a quality claim against T3_7m — one draw is ±2.5 tasks). Record max observed wall time from the 38×3 screen (not just mean) and the Kaggle run duration from this submission's metadata once scored, to get a second, more direct margin estimate.
 
 VMs: `gemma-train2-20261016` (A100) and `gemma-l4-bench-20261021` (L4) both stopped, disks retained.
+
+**2026-10-21 (CORRECTION to the Design A NO-GO above):**
+
+The second agent pushed back on the Design A NO-GO verdict, correctly identifying the methodology flaw: truncating T3_7m's 7-minute traces at a ~6K-token cutoff models "an agent that thinks it has 7 minutes and gets stopped," not "an agent properly configured for 5 minutes." Proposed validating this by truncating T3_7m traces at T3_5m's own real observed token budget and comparing to T3_5m's actual result.
+
+**Ran the check with real T3_5m trace data (pulled from the VM, now committed): the truncation method is decisively falsified.** T3_5m's real resolve rate (32.5%, 37/114) is nearly double the predicted rate from truncating T3_7m at T3_5m's actual median token usage (18.4%, even at T3_5m's own observed max of 8,803 tokens the prediction is only 22.8%). **The model adapts when genuinely budgeted for less time — it does not behave like a longer trajectory cut short.** This invalidates the entire truncation-based gate, not just its conclusion.
+
+**Recomputed Design A's pass@3 using T3_5m's own 3 real samples (not truncated estimates): pass@1 28.9% (11/38), pass@3 oracle 39.5% (15/38), naive vote 39.5% (15/38).** This clears the second agent's own go/no-go bar (their stated failure condition was "collapse toward 13" — real result is 15, comfortably above). Full writeup and caveats (this used 3 independent sequential 5-min runs as a proxy for 3 concurrent solvers sharing one 5-min window, which will have somewhat less budget per solver after locate/selector overhead — a real screen is still needed, not just this proxy): `2026-10-21_design-a-verdict-correction.md`.
+
+**Verdict: Design A is back to GO, P-lite (sequential version) is deprioritized.** Lesson for future gating: don't validate a new budget regime by truncating traces generated under a different regime — get real data at the target budget before concluding anything. The second agent's instinct to demand empirical validation before accepting a NO-GO was correct and caught a real error.
+
+**Revised next steps:**
+1. T3_5m + thinking_budget=1536 screen (cheap, addresses the "72% of runs exceed 6K tokens" finding directly).
+2. Build P3 (Design A) at the 5-min cap: scripted locate, concurrent `ParallelAgent[solver, analyzer_1, analyzer_2]` (not sequential locate→solvers→selector — analyzers run alongside the solver and write `/tmp/hints_*.md`, since P2 showed prose checkpoints don't reliably fire and sequential staging would cost the solver wall-clock), thinking cap 1536 in solvers.
+3. Submit T3_5m to Kaggle (scorer-safe hedge, unconditional 10.2h worst-case bound).
+
+VM `gemma-train2-20261016` restarted briefly to pull T3_5m's raw trace data (should have been committed in the original T3_5m session, wasn't — fixed now), stopped again after.
