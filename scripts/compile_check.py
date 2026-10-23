@@ -31,18 +31,28 @@ def main() -> None:
         limits=limits,
         generation_constraints=constraints,
     )
-    gen = agent.generate_content_config
-    tools = [getattr(t, "name", None) or getattr(t, "__name__", type(t).__name__) for t in agent.tools]
-    sub_agents = [a.name for a in getattr(agent, "sub_agents", [])]
+    def describe(a, depth=0):
+        node = {"agent": a.name, "class": type(a).__name__, "depth": depth}
+        gen = getattr(a, "generate_content_config", None)
+        if gen is not None:
+            node["generation"] = gen.model_dump(exclude_none=True)
+        tools = getattr(a, "tools", None)
+        if tools:
+            node["tools"] = [getattr(t, "name", None) or getattr(t, "__name__", type(t).__name__) for t in tools]
+        model = getattr(a, "model", None)
+        if model is not None:
+            node["model"] = getattr(model, "model", str(model))
+        instr = getattr(a, "instruction", None)
+        if instr:
+            node["instruction_chars"] = len(instr)
+        children = list(getattr(a, "sub_agents", []) or [])
+        if children:
+            node["sub_agents"] = [describe(c, depth + 1) for c in children]
+        return node
+
     eval_cfg = yaml.safe_load((sub / "eval_config.yaml").read_text())["evaluation"]
     report = {
-        "agent": agent.name,
-        "class": type(agent).__name__,
-        "model": getattr(agent.model, "model", str(agent.model)),
-        "generation": gen.model_dump(exclude_none=True) if gen else None,
-        "tools": tools,
-        "sub_agents": sub_agents,
-        "instruction_chars": len(agent.instruction or ""),
+        "tree": describe(agent),
         "eval_config": eval_cfg,
         "model_requests": 0,
     }
