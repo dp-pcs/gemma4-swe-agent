@@ -708,3 +708,56 @@ VM `gemma-train2-20261016` restarted briefly to pull T3_5m's raw trace data (sho
 4. Consider pinning `prometheus-fastapi-instrumentator>=8.0.0` and a compatible `starlette` range in any future venv-repair script to prevent this recurring.
 
 VM `gemma-train2-20261016` stopped; this session hit significant SSH-over-IAP flakiness (same intermittent pattern as prior sessions — short commands succeed, ~50% of commands following a kill/restart fail then succeed on retry).
+
+**2026-10-23: P3 screened and REJECTED — ParallelAgent sub-agents have no enforceable per-stage call budget**
+
+Tightened solver_a/b/c prompts first (compress reads to 2 calls max, mandate edit by call 4
+instead of 5, fix a "Candidate a written" typo in solver_b, make worktree-vs-workspace path
+semantics explicit). Fixed `scripts/compile_check.py` for the swegemma 0.2.11 API (it was broken,
+calling a function removed in the version upgrade; now walks the sub-agent tree instead of
+reading root-agent attributes directly, since P3's root is a `SequentialAgent` with no
+`generate_content_config`). Compile check now passes clean and works from the local `.venv`
+(upgraded in place from the stale 0.2.7).
+
+Started `gemma-train2-20261016` (3rd attempt after 2 Spot stockouts in us-central1-f), confirmed
+all 4 vLLM replicas serving, pushed the updated prompts (the staged VM arm had stale pre-edit
+copies), and ran P3 vs the existing calibrated T3_5m/T3_5m_tc1536 baseline data (38×3=114 runs,
+reusing baseline data rather than re-running it).
+
+**Run 1 (workers-per-endpoint=8, matching the existing matrix setup): 0/114 resolved, 100%
+timeout.** Diagnosis from traces: P3's 3 concurrent solver streams per task compounded with the
+matrix's 8 concurrent task-slots per endpoint → ~24 concurrent LLM streams per GPU during the
+solver phase → measured decode rate **1.2-7.1 tok/s** (vs. 34.3 tok/s single-stream target). Every
+run blew the 5-minute wall-clock before the selector stage could execute. This is a screening
+methodology artifact (the N=8 calibration assumed 1 stream per task-slot; P3 has 3), not a P3
+design failure — on the real scorer's sequential evaluation, P3's 3 solvers would only contend
+with each other (≈30 tok/s/stream per the L4 N=3 benchmark), fitting comfortably in ~110-115s.
+
+**Run 2 (corrected: workers-per-endpoint=1): 2/114 resolved (1.8%) vs T3_5m_tc1536's 29/114
+(25.4%) — net -26, p=0.0. Still rejected, now for a real design reason.** Decode throughput
+recovered, but trace inspection (`results/p3_screen_20261023/diagnostic_traces/
+trace_fastapi_14303_w1_solver_c_overrun.json`) found the actual cause: **no ADK mechanism found
+in this harness version enforces a per-sub-agent call budget inside a SequentialAgent/
+ParallelAgent — `eval_config.yaml`'s `max_tool_calls`/`max_time_minutes` bound the whole session,
+not each stage.** `locate` used 3-4 calls against its stated 2-call limit (same failure mode as
+the original smoke test); one solver (`solver_c` in the inspected trace) made **~20 tool calls**
+against its 7-call budget, running from el=64s to el=311s while its siblings finished on schedule
+around el=120s. `ParallelAgent` blocks until all sub-agents complete, so the one runaway solver
+starved the `selector` — the only stage holding `submit_patch` — out of ever running. Mean tool
+calls 56.8 (vs. T3_5m's 15.7) and failures shifted to timeout 70 / empty_patch 32 confirm this
+pattern generalized across the 114 runs, not just the one inspected trace. Full writeup, both
+analysis JSONs and three annotated diagnostic traces: `results/p3_screen_20261023/RESULTS.md`.
+
+**Decision: reject P3 (Design A, parallel-solver ensemble) outright. No submission.** Single-agent
+arms survive the same "prose budgets are soft" failure mode because the harness's one session-wide
+budget directly bounds the one agent; P3's multi-agent structure means one non-compliant sub-agent
+can starve every sibling and the finishing stage. Fixing this needs either a per-sub-agent hard
+limit this harness version doesn't expose, or an architecturally different (non-concurrent) design
+— neither is worth pursuing before the 2026-12-02 deadline given **T3_5m / T3_5m_tc1536 remain the
+best-validated arms at 24.6-25.4% calibrated resolution**, a materially higher and better-understood
+bar. Next session: return to single-agent prompt refinement on top of T3_5m, or decide on final
+submission picks from the arms already screened (T3_5m is the scorer-safe hedge already PENDING as
+refs 57504748/57549216).
+
+VM `gemma-train2-20261016` stopped (not deleted) ~22:4x UTC after both runs and result collection;
+≈1 hour of 4x A100 Spot time this session (~$10-12). No new GCP resources created.
